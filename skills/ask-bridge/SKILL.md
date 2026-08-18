@@ -421,7 +421,7 @@ ask-bridge close
 ## 執行與診斷特性
 
 - 每次 CLI 執行會重用同一個長連線 `chrome-devtools-mcp` 子程序，不會為每個瀏覽器操作重啟 MCP server。
-- 專案目前固定使用 `chrome-devtools-mcp@1.5.0`，並直接透過內建的 `mcp-cli` Rust library 建立 stdio 連線；不需要另外安裝 `mcp-cli` 執行檔。
+- 專案目前固定使用 `chrome-devtools-mcp@1.7.0`，並直接透過內建的 `mcp-cli` Rust library 建立 stdio 連線；不需要另外安裝 `mcp-cli` 執行檔。
 - MCP 連線建立上限為 `120` 秒，單次 MCP tool 呼叫上限為 `90` 秒。這兩個內部上限與使用者設定的 `--timeout` 不同；`--timeout` 只控制 provider 回覆與登入偵測等待時間。
 - MCP 設定、日誌與 Chrome profile 分別位於 `~/.config/ask-bridge/mcp_servers.json`、`~/.config/ask-bridge/chrome-devtools-mcp.log` 與 `~/.config/ask-bridge/chrome-profile`。Chrome 使用遠端除錯 port `9223`。
 

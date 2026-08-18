@@ -1067,7 +1067,7 @@ fn check_node_runtime() -> Result<(), String> {
 /// spawn re-resolve the dist-tag against the npm registry, which was observed
 /// stalling; with mcp-cli's timeout-less request wait that hung whole runs
 /// (2026-07-11). Bump this version deliberately and re-run the e2e check.
-const MCP_PACKAGE_SPEC: &str = "chrome-devtools-mcp@1.5.0";
+const MCP_PACKAGE_SPEC: &str = "chrome-devtools-mcp@1.7.0";
 
 fn build_chrome_devtools_server_config(
     quiet_mcp: bool,
