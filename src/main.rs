@@ -3014,7 +3014,7 @@ mod tests {
             "dataUrl": "data:image/png;base64,iVBORw0KGgo="
         });
 
-        let images = wait_for_images(Duration::from_secs(1), Duration::ZERO, || {
+        let images = wait_for_images(Duration::from_secs(1), Duration::ZERO, |_| {
             let attempt = attempts.get();
             attempts.set(attempt + 1);
 
@@ -3036,7 +3036,7 @@ mod tests {
     #[test]
     fn does_not_retry_when_image_scan_reports_no_image_expected() {
         let attempts = std::cell::Cell::new(0usize);
-        let images = wait_for_images(Duration::from_secs(1), Duration::ZERO, || {
+        let images = wait_for_images(Duration::from_secs(1), Duration::ZERO, |_| {
             attempts.set(attempts.get() + 1);
             Ok(ImageScanResult {
                 images: Vec::new(),
@@ -3051,7 +3051,7 @@ mod tests {
 
     #[test]
     fn times_out_when_image_scan_stays_not_ready() {
-        let error = wait_for_images(Duration::ZERO, Duration::ZERO, || {
+        let error = wait_for_images(Duration::ZERO, Duration::ZERO, |_| {
             Ok(ImageScanResult {
                 images: Vec::new(),
                 should_retry: true,
@@ -3060,6 +3060,19 @@ mod tests {
         .expect_err("a permanently pending image should time out");
 
         assert!(error.contains("generated images"));
+    }
+
+    #[test]
+    fn handles_large_image_wait_timeout_without_overflow() {
+        let images = wait_for_images(Duration::from_secs(u64::MAX), Duration::ZERO, |_| {
+            Ok(ImageScanResult {
+                images: Vec::new(),
+                should_retry: false,
+            })
+        })
+        .expect("a large timeout should not overflow Instant");
+
+        assert!(images.is_empty());
     }
 
     fn make_test_dir(name: &str) -> std::path::PathBuf {
@@ -4728,6 +4741,8 @@ struct ImageScanResult {
 }
 
 const IMAGE_SCAN_RETRY_INTERVAL: Duration = Duration::from_millis(250);
+const IMAGE_SCAN_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const IMAGE_SCAN_MAX_WAIT: Duration = Duration::from_secs(15);
 
 fn wait_for_images<F>(
     timeout: Duration,
@@ -4735,17 +4750,18 @@ fn wait_for_images<F>(
     mut scan: F,
 ) -> Result<Vec<Value>, String>
 where
-    F: FnMut() -> Result<ImageScanResult, String>,
+    F: FnMut(Duration) -> Result<ImageScanResult, String>,
 {
-    let deadline = Instant::now() + timeout;
+    let started_at = Instant::now();
 
     loop {
-        let result = scan()?;
+        let remaining = timeout.saturating_sub(started_at.elapsed());
+        let result = scan(remaining)?;
         if !result.images.is_empty() || !result.should_retry {
             return Ok(result.images);
         }
 
-        let remaining = deadline.saturating_duration_since(Instant::now());
+        let remaining = timeout.saturating_sub(started_at.elapsed());
         if remaining.is_zero() {
             return Err("Timed out waiting for generated images to become ready".to_string());
         }
@@ -4754,8 +4770,10 @@ where
     }
 }
 
-fn build_image_scan_script(latest_selector: &str) -> String {
+fn build_image_scan_script(latest_selector: &str, image_wait_timeout: Duration) -> String {
+    let image_wait_timeout_ms = image_wait_timeout.as_millis().min(10_000);
     r#"() => {
+                const imageScanDeadline = performance.now() + __IMAGE_WAIT_TIMEOUT_MS__;
                 window.__downloaded_images_status = "pending";
                 window.__downloaded_images = null;
                 (async () => {
@@ -4791,15 +4809,28 @@ fn build_image_scan_script(latest_selector: &str) -> String {
                         });
 
                         const imagesData = [];
+                        const waitForImage = (img) => new Promise((resolve) => {
+                            let settled = false;
+                            let timeoutId;
+                            const finish = () => {
+                                if (settled) return;
+                                settled = true;
+                                clearTimeout(timeoutId);
+                                img.removeEventListener('load', finish);
+                                img.removeEventListener('error', finish);
+                                resolve();
+                            };
+                            img.addEventListener('load', finish, { once: true });
+                            img.addEventListener('error', finish, { once: true });
+                            const remainingMs = Math.max(0, imageScanDeadline - performance.now());
+                            timeoutId = setTimeout(finish, Math.min(10000, remainingMs));
+                            if (img.complete && img.naturalWidth > 0) finish();
+                        });
                         for (let i = 0; i < candidateImgs.length; i++) {
                             const img = candidateImgs[i];
                             try {
                                 if (!img.complete || img.naturalWidth === 0) {
-                                    await new Promise((resolve) => {
-                                        img.addEventListener('load', resolve, { once: true });
-                                        img.addEventListener('error', resolve, { once: true });
-                                        setTimeout(resolve, 10000);
-                                    });
+                                    await waitForImage(img);
                                 }
                                 if (!img.complete || img.naturalWidth === 0) continue;
 
@@ -4851,6 +4882,7 @@ fn build_image_scan_script(latest_selector: &str) -> String {
                 })();
                 return { ok: true };
             }"#
+    .replace("__IMAGE_WAIT_TIMEOUT_MS__", &image_wait_timeout_ms.to_string())
     .replace("__LATEST_SELECTOR__", latest_selector)
 }
 
@@ -4866,8 +4898,9 @@ fn download_images_from_latest_message(
     }
     let latest_selector = serde_json::to_string(provider.latest_response_selector())
         .map_err(|e| format!("Failed to serialize response selector: {}", e))?;
-    let image_scan_js = build_image_scan_script(&latest_selector);
-    let mut scan_images_once = || -> Result<ImageScanResult, String> {
+    let mut scan_images_once = |scan_timeout: Duration| -> Result<ImageScanResult, String> {
+        let scan_timeout = std::cmp::min(scan_timeout, IMAGE_SCAN_MAX_WAIT);
+        let image_scan_js = build_image_scan_script(&latest_selector, scan_timeout);
         let start_res = call_mcp_tool(
             config_path,
             "evaluate_script",
@@ -4881,10 +4914,10 @@ fn download_images_from_latest_message(
             return Err("Failed to initiate image scanning script".to_string());
         }
 
+        let scan_started_at = Instant::now();
         let mut wait_cycles = 0;
         let mut status = String::from("pending");
         while status == "pending" && wait_cycles < 150 {
-            thread::sleep(Duration::from_millis(100));
             let check_res = call_mcp_tool(
                 config_path,
                 "evaluate_script",
@@ -4899,6 +4932,16 @@ fn download_images_from_latest_message(
                 status = s;
             }
             wait_cycles += 1;
+
+            if status != "pending" {
+                break;
+            }
+
+            let remaining = scan_timeout.saturating_sub(scan_started_at.elapsed());
+            if remaining.is_zero() {
+                break;
+            }
+            thread::sleep(std::cmp::min(IMAGE_SCAN_POLL_INTERVAL, remaining));
         }
 
         if status.starts_with("error:") {
