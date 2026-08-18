@@ -3007,6 +3007,74 @@ mod tests {
         assert!(error.contains("Could not extract text field"));
     }
 
+    #[test]
+    fn retries_image_scan_after_empty_result_when_dom_is_not_ready() {
+        let attempts = std::cell::Cell::new(0usize);
+        let image = serde_json::json!({
+            "dataUrl": "data:image/png;base64,iVBORw0KGgo="
+        });
+
+        let images = wait_for_images(Duration::from_secs(1), Duration::ZERO, |_| {
+            let attempt = attempts.get();
+            attempts.set(attempt + 1);
+
+            Ok(ImageScanResult {
+                images: if attempt == 0 {
+                    Vec::new()
+                } else {
+                    vec![image.clone()]
+                },
+                should_retry: true,
+            })
+        })
+        .expect("a later DOM scan should return the generated image");
+
+        assert_eq!(images, vec![image]);
+        assert_eq!(attempts.get(), 2);
+    }
+
+    #[test]
+    fn does_not_retry_when_image_scan_reports_no_image_expected() {
+        let attempts = std::cell::Cell::new(0usize);
+        let images = wait_for_images(Duration::from_secs(1), Duration::ZERO, |_| {
+            attempts.set(attempts.get() + 1);
+            Ok(ImageScanResult {
+                images: Vec::new(),
+                should_retry: false,
+            })
+        })
+        .expect("a text-only response should finish without an image");
+
+        assert!(images.is_empty());
+        assert_eq!(attempts.get(), 1);
+    }
+
+    #[test]
+    fn times_out_when_image_scan_stays_not_ready() {
+        let error = wait_for_images(Duration::ZERO, Duration::ZERO, |_| {
+            Ok(ImageScanResult {
+                images: Vec::new(),
+                should_retry: true,
+            })
+        })
+        .expect_err("a permanently pending image should time out");
+
+        assert!(error.contains("generated images"));
+    }
+
+    #[test]
+    fn handles_large_image_wait_timeout_without_overflow() {
+        let images = wait_for_images(Duration::from_secs(u64::MAX), Duration::ZERO, |_| {
+            Ok(ImageScanResult {
+                images: Vec::new(),
+                should_retry: false,
+            })
+        })
+        .expect("a large timeout should not overflow Instant");
+
+        assert!(images.is_empty());
+    }
+
     fn make_test_dir(name: &str) -> std::path::PathBuf {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -4666,18 +4734,46 @@ fn scrape_latest_markdown_from_dom(
     Ok(content)
 }
 
-fn download_images_from_latest_message(
-    config_path: &str,
-    provider: Provider,
-    image_output: Option<&str>,
-    verbose: bool,
-) -> Result<(), String> {
-    if verbose {
-        println!("Checking for generated images in the latest assistant response...");
+#[derive(Debug, PartialEq)]
+struct ImageScanResult {
+    images: Vec<Value>,
+    should_retry: bool,
+}
+
+const IMAGE_SCAN_RETRY_INTERVAL: Duration = Duration::from_millis(250);
+const IMAGE_SCAN_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const IMAGE_SCAN_MAX_WAIT: Duration = Duration::from_secs(15);
+
+fn wait_for_images<F>(
+    timeout: Duration,
+    retry_interval: Duration,
+    mut scan: F,
+) -> Result<Vec<Value>, String>
+where
+    F: FnMut(Duration) -> Result<ImageScanResult, String>,
+{
+    let started_at = Instant::now();
+
+    loop {
+        let remaining = timeout.saturating_sub(started_at.elapsed());
+        let result = scan(remaining)?;
+        if !result.images.is_empty() || !result.should_retry {
+            return Ok(result.images);
+        }
+
+        let remaining = timeout.saturating_sub(started_at.elapsed());
+        if remaining.is_zero() {
+            return Err("Timed out waiting for generated images to become ready".to_string());
+        }
+
+        thread::sleep(std::cmp::min(retry_interval, remaining));
     }
-    let latest_selector = serde_json::to_string(provider.latest_response_selector())
-        .map_err(|e| format!("Failed to serialize response selector: {}", e))?;
-    let image_scan_js = r#"() => {
+}
+
+fn build_image_scan_script(latest_selector: &str, image_wait_timeout: Duration) -> String {
+    let image_wait_timeout_ms = image_wait_timeout.as_millis().min(10_000);
+    r#"() => {
+                const imageScanDeadline = performance.now() + __IMAGE_WAIT_TIMEOUT_MS__;
                 window.__downloaded_images_status = "pending";
                 window.__downloaded_images = null;
                 (async () => {
@@ -4685,12 +4781,19 @@ fn download_images_from_latest_message(
                         const messages = document.querySelectorAll(__LATEST_SELECTOR__);
                         const latestMessage = messages[messages.length - 1];
                         if (!latestMessage) {
-                            window.__downloaded_images = [];
+                            window.__downloaded_images = { images: [], shouldRetry: false };
                             window.__downloaded_images_status = "success";
                             return;
                         }
-                        
+
                         const imgs = Array.from(latestMessage.querySelectorAll('img'));
+                        const responseText = (latestMessage.innerText || latestMessage.textContent || '').trim();
+                        const pendingImageMarker = latestMessage.querySelector(
+                            '[aria-busy="true"], [data-is-streaming="true"], [data-testid*="image"], [data-testid*="generat"], [class*="image"], [class*="generat"]'
+                        );
+                        const hasImageHint = imgs.length > 0 ||
+                            responseText.length === 0 ||
+                            Boolean(pendingImageMarker);
                         const seenSrcs = new Set();
                         const candidateImgs = imgs.filter(img => {
                             const src = img.src || '';
@@ -4706,16 +4809,30 @@ fn download_images_from_latest_message(
                         });
 
                         const imagesData = [];
+                        const waitForImage = (img) => new Promise((resolve) => {
+                            let settled = false;
+                            let timeoutId;
+                            const finish = () => {
+                                if (settled) return;
+                                settled = true;
+                                clearTimeout(timeoutId);
+                                img.removeEventListener('load', finish);
+                                img.removeEventListener('error', finish);
+                                resolve();
+                            };
+                            img.addEventListener('load', finish, { once: true });
+                            img.addEventListener('error', finish, { once: true });
+                            const remainingMs = Math.max(0, imageScanDeadline - performance.now());
+                            timeoutId = setTimeout(finish, Math.min(10000, remainingMs));
+                            if (img.complete && img.naturalWidth > 0) finish();
+                        });
                         for (let i = 0; i < candidateImgs.length; i++) {
                             const img = candidateImgs[i];
                             try {
-                                if (!img.complete) {
-                                    await new Promise((resolve) => {
-                                        img.addEventListener('load', resolve);
-                                        img.addEventListener('error', resolve);
-                                        setTimeout(resolve, 10000);
-                                    });
+                                if (!img.complete || img.naturalWidth === 0) {
+                                    await waitForImage(img);
                                 }
+                                if (!img.complete || img.naturalWidth === 0) continue;
 
                                 let dataUrl = "";
                                 if ((img.src || '').startsWith('data:image/')) {
@@ -4723,6 +4840,7 @@ fn download_images_from_latest_message(
                                 } else {
                                     try {
                                         const response = await fetch(img.src);
+                                        if (!response.ok) throw new Error('image fetch returned ' + response.status);
                                         const blob = await response.blob();
                                         dataUrl = await new Promise((resolve, reject) => {
                                             const reader = new FileReader();
@@ -4735,6 +4853,7 @@ fn download_images_from_latest_message(
                                         canvas.width = img.naturalWidth || img.width || 512;
                                         canvas.height = img.naturalHeight || img.height || 512;
                                         const ctx = canvas.getContext('2d');
+                                        if (!ctx) continue;
                                         ctx.drawImage(img, 0, 0);
                                         dataUrl = canvas.toDataURL('image/png');
                                     }
@@ -4749,10 +4868,13 @@ fn download_images_from_latest_message(
                                     });
                                 }
                             } catch (err) {
-                                // ignore
+                                // The next scan can retry a transiently unavailable image.
                             }
                         }
-                        window.__downloaded_images = imagesData;
+                        window.__downloaded_images = {
+                            images: imagesData,
+                            shouldRetry: imagesData.length === 0 && hasImageHint
+                        };
                         window.__downloaded_images_status = "success";
                     } catch (e) {
                         window.__downloaded_images_status = "error: " + e.message;
@@ -4760,67 +4882,111 @@ fn download_images_from_latest_message(
                 })();
                 return { ok: true };
             }"#
-    .replace("__LATEST_SELECTOR__", &latest_selector);
+    .replace("__IMAGE_WAIT_TIMEOUT_MS__", &image_wait_timeout_ms.to_string())
+    .replace("__LATEST_SELECTOR__", latest_selector)
+}
 
-    let start_res = call_mcp_tool(
-        config_path,
-        "evaluate_script",
-        serde_json::json!({
-            "function": image_scan_js
-        }),
-    )?;
-
-    let start_parsed = parse_script_result(&start_res)?;
-    if !start_parsed["ok"].as_bool().unwrap_or(false) {
-        return Err("Failed to initiate image scanning script".to_string());
+fn download_images_from_latest_message(
+    config_path: &str,
+    provider: Provider,
+    image_output: Option<&str>,
+    image_wait_timeout: Duration,
+    verbose: bool,
+) -> Result<(), String> {
+    if verbose {
+        println!("Checking for generated images in the latest assistant response...");
     }
-
-    let mut wait_cycles = 0;
-    let mut status = String::from("pending");
-    while status == "pending" && wait_cycles < 150 {
-        thread::sleep(Duration::from_millis(100));
-        let check_res = call_mcp_tool(
+    let latest_selector = serde_json::to_string(provider.latest_response_selector())
+        .map_err(|e| format!("Failed to serialize response selector: {}", e))?;
+    let mut scan_images_once = |scan_timeout: Duration| -> Result<ImageScanResult, String> {
+        let scan_timeout = std::cmp::min(scan_timeout, IMAGE_SCAN_MAX_WAIT);
+        let image_scan_js = build_image_scan_script(&latest_selector, scan_timeout);
+        let start_res = call_mcp_tool(
             config_path,
             "evaluate_script",
             serde_json::json!({
-                "function": "() => window.__downloaded_images_status || 'pending'"
+                "function": &image_scan_js
             }),
         )?;
-        if let Some(s) = parse_script_result(&check_res)
-            .ok()
-            .and_then(|p| p.as_str().map(|str_ref| str_ref.to_string()))
-        {
-            status = s;
+
+        let start_parsed = parse_script_result(&start_res)?;
+        if !start_parsed["ok"].as_bool().unwrap_or(false) {
+            return Err("Failed to initiate image scanning script".to_string());
         }
-        wait_cycles += 1;
-    }
 
-    if status.starts_with("error:") {
-        return Err(format!("Image scanning failed: {}", status));
-    }
+        let scan_started_at = Instant::now();
+        let mut wait_cycles = 0;
+        let mut status = String::from("pending");
+        while status == "pending" && wait_cycles < 150 {
+            let check_res = call_mcp_tool(
+                config_path,
+                "evaluate_script",
+                serde_json::json!({
+                    "function": "() => window.__downloaded_images_status || 'pending'"
+                }),
+            )?;
+            if let Some(s) = parse_script_result(&check_res)
+                .ok()
+                .and_then(|p| p.as_str().map(|str_ref| str_ref.to_string()))
+            {
+                status = s;
+            }
+            wait_cycles += 1;
 
-    if status == "pending" {
-        return Err("Timed out waiting for images to download in browser".to_string());
-    }
+            if status != "pending" {
+                break;
+            }
 
-    let get_res = call_mcp_tool(
-        config_path,
-        "evaluate_script",
-        serde_json::json!({
-            "function": r#"() => {
-                const res = window.__downloaded_images || [];
-                delete window.__downloaded_images;
-                delete window.__downloaded_images_status;
-                return res;
-            }"#
-        }),
-    )?;
+            let remaining = scan_timeout.saturating_sub(scan_started_at.elapsed());
+            if remaining.is_zero() {
+                break;
+            }
+            thread::sleep(std::cmp::min(IMAGE_SCAN_POLL_INTERVAL, remaining));
+        }
 
-    let parsed = parse_script_result(&get_res)?;
-    let images = match parsed.as_array() {
-        Some(arr) => arr,
-        None => return Ok(()),
+        if status.starts_with("error:") {
+            return Err(format!("Image scanning failed: {}", status));
+        }
+
+        if status == "pending" {
+            return Err("Timed out waiting for images to download in browser".to_string());
+        }
+
+        let get_res = call_mcp_tool(
+            config_path,
+            "evaluate_script",
+            serde_json::json!({
+                "function": r#"() => {
+                    const res = window.__downloaded_images || { images: [], shouldRetry: false };
+                    delete window.__downloaded_images;
+                    delete window.__downloaded_images_status;
+                    return res;
+                }"#
+            }),
+        )?;
+
+        let parsed = parse_script_result(&get_res)?;
+        let images = parsed
+            .get("images")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .ok_or_else(|| "Image scan returned an invalid image list".to_string())?;
+        let should_retry = parsed
+            .get("shouldRetry")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+
+        Ok(ImageScanResult {
+            images,
+            should_retry,
+        })
     };
+
+    let images = wait_for_images(
+        image_wait_timeout,
+        IMAGE_SCAN_RETRY_INTERVAL,
+        &mut scan_images_once,
+    )?;
 
     if images.is_empty() {
         if verbose {
@@ -6781,9 +6947,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 &config_path,
                                 page_provider,
                                 cli.image_output.as_deref(),
+                                Duration::from_secs(cli.timeout),
                                 command_verbose,
                             ) {
                                 eprintln!("Error downloading images: {}", e);
+                                std::process::exit(1);
                             }
                         }
                         Err(e) => {
@@ -6849,9 +7017,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             &config_path,
                             page_provider,
                             cli.image_output.as_deref(),
+                            Duration::from_secs(cli.timeout),
                             command_verbose,
                         ) {
                             eprintln!("Error downloading images: {}", e);
+                            std::process::exit(1);
                         }
                     }
                     Err(e) => {
@@ -7135,6 +7305,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Waiting for {} response...", provider.display_name());
     }
 
+    let response_wait_started_at = Instant::now();
     let mut last_markdown = String::new();
     let mut finished = false;
     let mut wait_cycles = 0;
@@ -7265,16 +7436,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Error rendering Markdown: {}", e);
     }
 
+    let mut image_download_error = None;
     if finished {
-        let _ = download_images_from_latest_message(
+        let image_wait_timeout =
+            Duration::from_secs(cli.timeout).saturating_sub(response_wait_started_at.elapsed());
+        if let Err(e) = download_images_from_latest_message(
             &config_path,
             provider,
             cli.image_output.as_deref(),
+            image_wait_timeout,
             command_verbose,
-        )
-        .map_err(|e| {
-            eprintln!("Error downloading images: {}", e);
-        });
+        ) {
+            image_download_error = Some(e);
+        }
     }
 
     // Print the URL link of the current conversation thread
@@ -7295,6 +7469,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             println!("\nThread Link: {}", url);
         }
+    }
+
+    if let Some(error) = image_download_error {
+        eprintln!("Error downloading images: {}", error);
+        std::process::exit(1);
     }
 
     if let Some(ref output_path) = cli.output {
