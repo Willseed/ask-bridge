@@ -335,7 +335,7 @@ if ($Local) {
 }
 
 # 3. Target configuration
-$Version = "0.2.12"
+$Version = "0.2.13"
 $RepoOwner = "doggy8088"
 $RepoName = "ask-bridge"
 $ArtifactName = "ask-bridge-x86_64-pc-windows-msvc.zip"

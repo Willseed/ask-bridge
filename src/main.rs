@@ -1,15 +1,19 @@
 use base64::{Engine as _, engine::general_purpose};
 use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
-use mcp_cli::{McpClient, McpConnection, ServerConfig, StdioClient};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::fmt;
 use std::io::{self, IsTerminal, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::sync::{Mutex, oneshot};
 use url::Url;
 
 #[cfg(target_os = "windows")]
@@ -609,7 +613,7 @@ fn parse_chatgpt_agent_prompt(prompt: &str) -> Option<ChatGptAgentPrompt<'_>> {
 
 #[derive(Parser)]
 #[command(name = "ask-bridge")]
-#[command(version = "0.2.12")]
+#[command(version = "0.2.13")]
 #[command(disable_version_flag = true)]
 #[command(about = "AI browser CLI - Ask ChatGPT, Gemini or Claude from your Terminal with your subscription", long_about = None)]
 struct Cli {
@@ -2427,20 +2431,285 @@ fn wait_for_debug_port_free(timeout: Duration) -> bool {
     false
 }
 
-static FORWARD_MCP_STDERR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+static FORWARD_MCP_STDERR: AtomicBool = AtomicBool::new(true);
+
+#[derive(Clone, Debug, Deserialize)]
+struct McpConfigFile {
+    #[serde(rename = "mcpServers")]
+    mcp_servers: HashMap<String, StdioServerConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct StdioServerConfig {
+    command: String,
+    args: Option<Vec<String>>,
+    env: Option<HashMap<String, String>>,
+    cwd: Option<String>,
+}
+
+fn load_chrome_devtools_config(config_path: &str) -> Result<StdioServerConfig, String> {
+    let content = std::fs::read_to_string(config_path)
+        .map_err(|e| format!("Failed to read MCP config from {}: {}", config_path, e))?;
+    let parsed: McpConfigFile = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse MCP config from {}: {}", config_path, e))?;
+    parsed
+        .mcp_servers
+        .get("chrome-devtools")
+        .cloned()
+        .ok_or_else(|| "Missing chrome-devtools MCP server config".to_string())
+}
+
+fn is_noisy_mcp_log(line: &str) -> bool {
+    line.contains("No handler registered for issue code")
+}
+
+type PendingRequests = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
+
+#[derive(Clone)]
+struct McpStdioClient {
+    stdin_tx: tokio::sync::mpsc::Sender<String>,
+    pending_requests: PendingRequests,
+    next_id: Arc<AtomicU64>,
+    child: Arc<Mutex<Option<tokio::process::Child>>>,
+}
+
+impl McpStdioClient {
+    async fn connect(config: &StdioServerConfig) -> Result<Self, String> {
+        let mut cmd = tokio::process::Command::new(&config.command);
+        if let Some(ref args) = config.args {
+            cmd.args(args);
+        }
+
+        let mut merged_env = HashMap::new();
+        for (k, v) in std::env::vars() {
+            merged_env.insert(k, v);
+        }
+        if let Some(ref env) = config.env {
+            for (k, v) in env {
+                merged_env.insert(k.clone(), v.clone());
+            }
+        }
+        cmd.envs(merged_env);
+
+        if let Some(ref cwd) = config.cwd {
+            cmd.current_dir(cwd);
+        }
+
+        cmd.stdin(Stdio::piped());
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("Failed to spawn chrome-devtools MCP process: {}", e))?;
+
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "Failed to open MCP process stdin".to_string())?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "Failed to open MCP process stdout".to_string())?;
+        let mut stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| "Failed to open MCP process stderr".to_string())?;
+
+        let pending_requests: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
+        let last_stderr_lines = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+
+        let last_stderr_lines_clone = Arc::clone(&last_stderr_lines);
+        tokio::spawn(async move {
+            let mut reader = BufReader::new(&mut stderr);
+            let mut line = String::new();
+            while let Ok(n) = reader.read_line(&mut line).await {
+                if n == 0 {
+                    break;
+                }
+                let trimmed = line.trim_end();
+                if FORWARD_MCP_STDERR.load(Ordering::Relaxed) && !is_noisy_mcp_log(trimmed) {
+                    eprint!("[chrome-devtools] {}", line);
+                }
+                {
+                    let mut lines = last_stderr_lines_clone.lock().await;
+                    lines.push_back(trimmed.to_string());
+                    if lines.len() > 10 {
+                        lines.pop_front();
+                    }
+                }
+                line.clear();
+            }
+        });
+
+        let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<String>(100);
+        let mut stdin_writer = stdin;
+        tokio::spawn(async move {
+            while let Some(msg) = stdin_rx.recv().await {
+                if stdin_writer.write_all(msg.as_bytes()).await.is_err() {
+                    break;
+                }
+                if stdin_writer.write_all(b"\n").await.is_err() {
+                    break;
+                }
+                if stdin_writer.flush().await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        let pending_requests_reader = Arc::clone(&pending_requests);
+        let last_stderr_lines_stdout = Arc::clone(&last_stderr_lines);
+        tokio::spawn(async move {
+            let mut reader = BufReader::new(stdout);
+            let mut line = String::new();
+            while let Ok(n) = reader.read_line(&mut line).await {
+                if n == 0 {
+                    break;
+                }
+                let line_trimmed = line.trim();
+                if line_trimmed.is_empty() {
+                    line.clear();
+                    continue;
+                }
+
+                if let Ok(val) = serde_json::from_str::<Value>(line_trimmed) {
+                    if let Some(id_val) = val.get("id") {
+                        if let Some(id_u64) = id_val.as_u64() {
+                            let mut reqs = pending_requests_reader.lock().await;
+                            if let Some(tx) = reqs.remove(&id_u64) {
+                                if let Some(error) = val.get("error") {
+                                    let msg = error
+                                        .get("message")
+                                        .and_then(|m| m.as_str())
+                                        .unwrap_or("Unknown error");
+                                    let _ = tx.send(Err(msg.to_string()));
+                                } else {
+                                    let result_val =
+                                        val.get("result").cloned().unwrap_or(Value::Null);
+                                    let _ = tx.send(Ok(result_val));
+                                }
+                            }
+                        }
+                    }
+                }
+                line.clear();
+            }
+
+            let last_stderr = {
+                let lines = last_stderr_lines_stdout.lock().await;
+                if lines.is_empty() {
+                    "No stderr output available.".to_string()
+                } else {
+                    lines.iter().cloned().collect::<Vec<_>>().join("\n")
+                }
+            };
+            let err_msg = format!(
+                "Server process exited unexpectedly. Last stderr:\n{}",
+                last_stderr
+            );
+            let mut reqs = pending_requests_reader.lock().await;
+            for (_, tx) in reqs.drain() {
+                let _ = tx.send(Err(err_msg.clone()));
+            }
+        });
+
+        let client = McpStdioClient {
+            stdin_tx,
+            pending_requests,
+            next_id: Arc::new(AtomicU64::new(1)),
+            child: Arc::new(Mutex::new(Some(child))),
+        };
+
+        let mut params = serde_json::Map::new();
+        params.insert(
+            "protocolVersion".to_string(),
+            serde_json::json!("2024-11-05"),
+        );
+        params.insert("capabilities".to_string(), serde_json::json!({}));
+        let mut client_info = serde_json::Map::new();
+        client_info.insert("name".to_string(), serde_json::json!("ask-bridge"));
+        client_info.insert(
+            "version".to_string(),
+            serde_json::json!(env!("CARGO_PKG_VERSION")),
+        );
+        params.insert("clientInfo".to_string(), Value::Object(client_info));
+
+        let _ = client.request("initialize", Value::Object(params)).await?;
+
+        client
+            .notify("notifications/initialized", serde_json::json!({}))
+            .await?;
+
+        Ok(client)
+    }
+
+    async fn request(&self, method: &str, params: Value) -> Result<Value, String> {
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let mut req = serde_json::Map::new();
+        req.insert("jsonrpc".to_string(), serde_json::json!("2.0"));
+        req.insert("id".to_string(), serde_json::json!(id));
+        req.insert("method".to_string(), serde_json::json!(method));
+        req.insert("params".to_string(), params);
+
+        let (tx, rx) = oneshot::channel();
+        {
+            let mut reqs = self.pending_requests.lock().await;
+            reqs.insert(id, tx);
+        }
+
+        let serialized = serde_json::to_string(&req).map_err(|e| e.to_string())?;
+        if self.stdin_tx.send(serialized).await.is_err() {
+            let mut reqs = self.pending_requests.lock().await;
+            reqs.remove(&id);
+            return Err("Failed to send request to process stdin".to_string());
+        }
+
+        match rx.await {
+            Ok(Ok(res)) => Ok(res),
+            Ok(Err(err)) => Err(format!("Tool \"{}\" execution failed: {}", method, err)),
+            Err(_) => Err("Stdio response receiver canceled".to_string()),
+        }
+    }
+
+    async fn notify(&self, method: &str, params: Value) -> Result<(), String> {
+        let mut req = serde_json::Map::new();
+        req.insert("jsonrpc".to_string(), serde_json::json!("2.0"));
+        req.insert("method".to_string(), serde_json::json!(method));
+        req.insert("params".to_string(), params);
+
+        let serialized = serde_json::to_string(&req).map_err(|e| e.to_string())?;
+        if self.stdin_tx.send(serialized).await.is_err() {
+            return Err("Failed to send notification to process stdin".to_string());
+        }
+        Ok(())
+    }
+
+    async fn call_tool(&self, tool_name: &str, args: Value) -> Result<Value, String> {
+        let mut params = serde_json::Map::new();
+        params.insert("name".to_string(), serde_json::json!(tool_name));
+        params.insert("arguments".to_string(), args);
+
+        self.request("tools/call", Value::Object(params)).await
+    }
+
+    async fn close(&self) -> Result<(), String> {
+        let mut child_guard = self.child.lock().await;
+        if let Some(mut child) = child_guard.take() {
+            let _ = child.kill().await;
+        }
+        Ok(())
+    }
+}
 
 /// One MCP session per run: a single long-lived chrome-devtools-mcp child plus
 /// the tokio runtime that drives its background reader tasks.
 ///
-/// Upstream called `McpClient::call_tool` per browser action, which spawns a
-/// fresh `npx chrome-devtools-mcp` child for every single action (~50 per
-/// query) and waits on its response without any timeout — one stalled npx
-/// spawn hung the whole run forever (2026-07-11). Reusing one connection
-/// removes the re-spawn churn; `MCP_CALL_TIMEOUT` turns any remaining stall
-/// into a loud, bounded error (see `mcp_error_is_transport` for why the failed
-/// call is not replayed).
+/// Reusing one connection removes the re-spawn churn; `MCP_CALL_TIMEOUT` turns
+/// any remaining stall into a loud, bounded error (see `mcp_error_is_transport`
+/// for why the failed call is not replayed).
 struct McpSession {
-    connection: McpConnection,
+    client: McpStdioClient,
     runtime: tokio::runtime::Runtime,
     config_path: String,
 }
@@ -2452,34 +2721,14 @@ const MCP_CALL_TIMEOUT: Duration = Duration::from_secs(90);
 const MCP_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn mcp_session_connect(config_path: &str) -> Result<McpSession, String> {
-    let client = McpClient::load(Some(config_path))
-        .map_err(|e| format!("Failed to load MCP config: {}", e))?;
-    let server_config = client
-        .server_config("chrome-devtools")
-        .map_err(|e| format!("Missing chrome-devtools MCP server config: {}", e))?;
-    // A multi-thread runtime with one worker keeps the connection's background
-    // stdout/stderr reader tasks running between calls (a current-thread
-    // runtime only makes progress inside block_on).
+    let server_config = load_chrome_devtools_config(config_path)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .enable_all()
         .build()
         .map_err(|e| format!("Failed to create async runtime for MCP session: {}", e))?;
-    let connection = runtime.block_on(async {
-        // Connect the stdio transport directly: mcp-cli's default path first
-        // tries its persistent daemon, which re-execs this binary with
-        // `--daemon` — an entrypoint ask-bridge does not implement — so that
-        // path can only ever fail and fall back.
-        let connect_future = async {
-            match &server_config {
-                ServerConfig::Stdio(stdio_config) => {
-                    StdioClient::connect("chrome-devtools", stdio_config)
-                        .await
-                        .map(McpConnection::Stdio)
-                }
-                _ => client.connect("chrome-devtools").await,
-            }
-        };
+    let client = runtime.block_on(async {
+        let connect_future = McpStdioClient::connect(&server_config);
         match tokio::time::timeout(MCP_CONNECT_TIMEOUT, connect_future).await {
             Err(_) => Err(format!(
                 "Failed to start chrome-devtools MCP server: timed out after {}s",
@@ -2491,7 +2740,7 @@ fn mcp_session_connect(config_path: &str) -> Result<McpSession, String> {
         }
     })?;
     Ok(McpSession {
-        connection,
+        client,
         runtime,
         config_path: config_path.to_string(),
     })
@@ -2500,15 +2749,10 @@ fn mcp_session_connect(config_path: &str) -> Result<McpSession, String> {
 fn mcp_session_reset(slot: &mut Option<McpSession>) {
     if let Some(session) = slot.take() {
         let McpSession {
-            connection,
-            runtime,
-            ..
+            client, runtime, ..
         } = session;
-        // Best-effort close (kills the child); if even that stalls, dropping
-        // the runtime stops the background tasks and the orphaned child exits
-        // on stdin EOF.
         let _ = runtime
-            .block_on(async { tokio::time::timeout(MCP_CLOSE_TIMEOUT, connection.close()).await });
+            .block_on(async { tokio::time::timeout(MCP_CLOSE_TIMEOUT, client.close()).await });
     }
 }
 
@@ -2528,26 +2772,25 @@ fn mcp_session_call(
     }
     let session = slot.as_ref().expect("session connected above");
     session.runtime.block_on(async {
-        match tokio::time::timeout(MCP_CALL_TIMEOUT, session.connection.call_tool(tool, args)).await
-        {
+        match tokio::time::timeout(MCP_CALL_TIMEOUT, session.client.call_tool(tool, args)).await {
             Err(_) => Err(format!(
                 "MCP tool '{}' timed out after {}s",
                 tool,
                 MCP_CALL_TIMEOUT.as_secs()
             )),
-            Ok(result) => result.map_err(|e| format!("mcp-cli library call failed: {}", e)),
+            Ok(result) => result.map_err(|e| format!("MCP tool call failed: {}", e)),
         }
     })
 }
 
 /// Errors that mean the MCP transport itself is dead or wedged: our own
-/// timeouts, or transport-level failures (dead child / closed pipes — exact
-/// phrases from mcp-cli's StdioClient). These earn a session reset so the next
-/// command starts clean. The failed call is deliberately NOT replayed: a
-/// timed-out request may already have executed in the browser (replaying a
-/// submit would double-post), and a fresh chrome-devtools-mcp child forgets
-/// the selected page (a replay could act on the wrong tab). Application-level
-/// tool errors (e.g. a JS exception from evaluate_script) propagate unchanged.
+/// timeouts, or transport-level failures (dead child / closed pipes).
+/// These earn a session reset so the next command starts clean. The failed
+/// call is deliberately NOT replayed: a timed-out request may already have
+/// executed in the browser (replaying a submit would double-post), and a fresh
+/// chrome-devtools-mcp child forgets the selected page (a replay could act on
+/// the wrong tab). Application-level tool errors (e.g. a JS exception from
+/// evaluate_script) propagate unchanged.
 fn mcp_error_is_transport(message: &str) -> bool {
     let lower = message.to_lowercase();
     lower.contains("timed out")
@@ -2558,15 +2801,6 @@ fn mcp_error_is_transport(message: &str) -> bool {
 }
 
 fn call_mcp_tool(config_path: &str, tool: &str, args: Value) -> Result<Value, String> {
-    let _stderr_guard = if FORWARD_MCP_STDERR.load(std::sync::atomic::Ordering::Relaxed) {
-        None
-    } else {
-        Some(
-            gag::Gag::stderr()
-                .map_err(|e| format!("Failed to suppress MCP stderr in quiet mode: {}", e))?,
-        )
-    };
-
     let mut slot = MCP_SESSION
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -2866,14 +3100,59 @@ mod tests {
         // ...application-level tool errors must NOT reset the session — the
         // transport is fine and the caller needs the original error.
         for app_level in [
-            "mcp-cli library call failed: Error [TOOL_EXECUTION_FAILED]: Tool \"click\" execution failed\n  Details: element not found",
-            "mcp-cli library call failed: Error [TOOL_EXECUTION_FAILED]: Tool \"evaluate_script\" execution failed\n  Details: TypeError: x is undefined",
+            "MCP tool call failed: Tool \"click\" execution failed: element not found",
+            "MCP tool call failed: Tool \"evaluate_script\" execution failed: TypeError: x is undefined",
         ] {
             assert!(
                 !mcp_error_is_transport(app_level),
                 "expected app-level error to pass through: {app_level}"
             );
         }
+    }
+
+    #[test]
+    fn filters_noisy_mcp_performance_issue_logs() {
+        assert!(is_noisy_mcp_log(
+            "No handler registered for issue code PerformanceIssue"
+        ));
+        assert!(is_noisy_mcp_log(
+            "[chrome-devtools] No handler registered for issue code PerformanceIssue"
+        ));
+        assert!(!is_noisy_mcp_log(
+            "Server process exited unexpectedly with error"
+        ));
+        assert!(!is_noisy_mcp_log("Error: connection refused"));
+    }
+
+    #[test]
+    fn loads_chrome_devtools_config_from_valid_json() {
+        let temp_dir = make_test_dir("mcp-config-test");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let config_path = temp_dir.join("mcp_servers.json");
+        std::fs::write(
+            &config_path,
+            r#"{
+                "mcpServers": {
+                    "chrome-devtools": {
+                        "command": "npx",
+                        "args": ["-y", "chrome-devtools-mcp@1.7.0"]
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let loaded = load_chrome_devtools_config(&config_path.to_string_lossy()).unwrap();
+        assert_eq!(loaded.command, "npx");
+        assert_eq!(
+            loaded.args,
+            Some(vec![
+                "-y".to_string(),
+                "chrome-devtools-mcp@1.7.0".to_string()
+            ])
+        );
+
+        let _ = std::fs::remove_dir_all(temp_dir);
     }
 
     #[test]
