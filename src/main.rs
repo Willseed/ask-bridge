@@ -63,6 +63,8 @@ enum Provider {
     Gemini,
     #[value(name = "claude")]
     Claude,
+    #[value(name = "grok")]
+    Grok,
 }
 
 impl Provider {
@@ -71,6 +73,7 @@ impl Provider {
             "chatgpt" | "chat-gpt" | "chat_gpt" => Some(Provider::ChatGpt),
             "gemini" => Some(Provider::Gemini),
             "claude" | "claude-ai" | "claude_ai" | "claudeai" => Some(Provider::Claude),
+            "grok" => Some(Provider::Grok),
             _ => None,
         }
     }
@@ -80,6 +83,7 @@ impl Provider {
             Provider::ChatGpt => "ChatGPT",
             Provider::Gemini => "Gemini",
             Provider::Claude => "Claude",
+            Provider::Grok => "Grok",
         }
     }
 
@@ -88,6 +92,7 @@ impl Provider {
             Provider::ChatGpt => "https://chatgpt.com/",
             Provider::Gemini => "https://gemini.google.com/app",
             Provider::Claude => "https://claude.ai/new",
+            Provider::Grok => "https://grok.com/",
         }
     }
 
@@ -105,6 +110,7 @@ impl Provider {
             "chatgpt.com" | "www.chatgpt.com" => Some(Provider::ChatGpt),
             "gemini.google.com" => Some(Provider::Gemini),
             "claude.ai" | "www.claude.ai" => Some(Provider::Claude),
+            "grok.com" | "www.grok.com" => Some(Provider::Grok),
             _ => None,
         }
     }
@@ -114,6 +120,7 @@ impl Provider {
             Provider::ChatGpt => format!("https://chatgpt.com/c/{session_id}"),
             Provider::Gemini => format!("https://gemini.google.com/app/{session_id}"),
             Provider::Claude => format!("https://claude.ai/chat/{session_id}"),
+            Provider::Grok => format!("https://grok.com/c/{session_id}"),
         }
     }
 
@@ -130,6 +137,7 @@ impl Provider {
             Provider::ChatGpt => "c",
             Provider::Gemini => "app",
             Provider::Claude => "chat",
+            Provider::Grok => "c",
         };
 
         path_segments
@@ -156,6 +164,15 @@ impl Provider {
                            document.querySelector('[data-testid="login-with-google"]') !== null ||
                            window.location.pathname.startsWith('/login') ||
                            /Sign in|登入/.test(document.body.innerText || '');
+                }"#
+            }
+            Provider::Grok => {
+                r#"() => {
+                    return document.querySelector('[data-testid="chat-input"] [role="textbox"]') !== null ||
+                           document.querySelector('[role="textbox"][contenteditable="true"][aria-label*="Ask Grok"]') !== null ||
+                           document.querySelector('button[data-testid="chat-submit"]') !== null ||
+                           document.querySelector('a[href*="/sign-in"], a[href*="/login"]') !== null ||
+                           /Sign in|Log in|登入/i.test(document.body.innerText || '');
                 }"#
             }
         }
@@ -308,6 +325,37 @@ impl Provider {
                     };
                 }"#
             }
+            Provider::Grok => {
+                r#"() => {
+                    const isVisible = (el) => {
+                        if (!el) return false;
+                        const style = window.getComputedStyle(el);
+                        const rect = el.getBoundingClientRect();
+                        return style.display !== 'none' && style.visibility !== 'hidden' &&
+                            style.opacity !== '0' && rect.width > 0 && rect.height > 0;
+                    };
+                    const composer = document.querySelector('[role="textbox"][contenteditable="true"][aria-label*="Ask Grok"]') ||
+                        document.querySelector('[data-testid="chat-input"] [role="textbox"]');
+                    const account = Array.from(document.querySelectorAll('button[aria-haspopup="menu"]'))
+                        .find((el) => {
+                            const label = [el.getAttribute('aria-label'), el.textContent].filter(Boolean).join(' ').trim();
+                            return isVisible(el) && label.length > 0 &&
+                                !/model|選擇模型|附加|attach|more actions/i.test(label);
+                        });
+                    const signIn = Array.from(document.querySelectorAll('a, button'))
+                        .some((el) => isVisible(el) && /^(log in|login|sign in|sign up|continue with x|登入|登錄|登录)$/i.test([
+                            el.getAttribute('aria-label'), el.textContent
+                        ].filter(Boolean).join(' ').trim()));
+                    const authPath = /^\/(login|sign-in|signup|auth)(\/|$)/i.test(window.location.pathname);
+                    return {
+                        account: Boolean(account),
+                        auth_control: Boolean(signIn),
+                        auth_path: authPath,
+                        composer: isVisible(composer),
+                        stable: true
+                    };
+                }"#
+            }
         }
     }
 
@@ -316,6 +364,7 @@ impl Provider {
             Provider::ChatGpt => "[data-message-author-role=\"assistant\"], .agent-turn",
             Provider::Gemini => "model-response",
             Provider::Claude => ".font-claude-response",
+            Provider::Grok => "[data-testid=\"assistant-message\"]",
         }
     }
 
@@ -326,6 +375,7 @@ impl Provider {
             }
             Provider::Gemini => "model-response",
             Provider::Claude => ".font-claude-response",
+            Provider::Grok => "[data-testid=\"assistant-message\"]",
         }
     }
 
@@ -336,6 +386,7 @@ impl Provider {
                 "message-content, .markdown, structured-content-container.model-response-text"
             }
             Provider::Claude => ".standard-markdown, .font-claude-response-body",
+            Provider::Grok => ":scope > div.relative",
         }
     }
 
@@ -354,6 +405,12 @@ impl Provider {
                     "div[contenteditable=\"true\"][data-testid=\"chat-input\"]",
                     "div[contenteditable=\"true\"].ProseMirror",
                     "div[aria-label*=\"Claude\"][contenteditable=\"true\"]"
+                ]"#
+            }
+            Provider::Grok => {
+                r#"[
+                    "[role=\"textbox\"][contenteditable=\"true\"][aria-label*=\"Ask Grok\"]",
+                    "[data-testid=\"chat-input\"] [role=\"textbox\"]"
                 ]"#
             }
         }
@@ -386,6 +443,7 @@ impl Provider {
                     "button[aria-label*=\"傳送\"]"
                 ]"#
             }
+            Provider::Grok => r#"["[data-testid=\"chat-submit\"]"]"#,
         }
     }
 
@@ -414,6 +472,9 @@ impl Provider {
                     "button[aria-label*=\"停止\"]"
                 ]"#
             }
+            Provider::Grok => {
+                r#"["button[aria-label=\"停止模型響應\"]","button[aria-label*=\"停止\"]","button[aria-label=\"Stop response\"]","button[aria-label=\"Stop generating\"]","button[aria-label*=\"Stop\"]"]"#
+            }
         }
     }
 }
@@ -424,6 +485,7 @@ impl fmt::Display for Provider {
             Provider::ChatGpt => write!(f, "chatgpt"),
             Provider::Gemini => write!(f, "gemini"),
             Provider::Claude => write!(f, "claude"),
+            Provider::Grok => write!(f, "grok"),
         }
     }
 }
@@ -492,6 +554,17 @@ fn parse_gemini_reasoning(value: &str) -> Option<ReasoningRequest> {
     }
 }
 
+fn grok_mode_aliases(value: &str) -> Option<&'static [&'static str]> {
+    match normalize_option_label(value).as_str() {
+        "auto" | "automatic" | "自動" => Some(&["auto", "automatic", "自動"]),
+        "fast" | "quick" | "快速" => Some(&["fast", "quick", "快速"]),
+        "expert" | "專家" => Some(&["expert", "專家"]),
+        "build" => Some(&["build"]),
+        "heavy" | "重型" => Some(&["heavy", "重型"]),
+        _ => None,
+    }
+}
+
 fn is_gemini_pro_model(model: &str) -> bool {
     let normalized = normalize_option_label(model);
     if normalized == "pro" {
@@ -535,12 +608,15 @@ fn resolve_selection_plan(
                     .to_string(),
             );
         }
+        (Provider::Grok, Some(_)) => {
+            return Err("Grok does not support --reasoning; use --model to select a Grok mode".to_string());
+        }
     };
 
     let legacy_reasoning = match (provider, model.as_deref()) {
         (Provider::ChatGpt, Some(value)) => parse_chatgpt_reasoning(value),
         (Provider::Gemini, Some(value)) => parse_gemini_reasoning(value),
-        (Provider::Claude, _) | (_, None) => None,
+        (Provider::Claude | Provider::Grok, _) | (_, None) => None,
     };
 
     if explicit_reasoning.is_some() && legacy_reasoning.is_some() {
@@ -615,7 +691,7 @@ fn parse_chatgpt_agent_prompt(prompt: &str) -> Option<ChatGptAgentPrompt<'_>> {
 #[command(name = "ask-bridge")]
 #[command(version = "0.2.13")]
 #[command(disable_version_flag = true)]
-#[command(about = "AI browser CLI - Ask ChatGPT, Gemini or Claude from your Terminal with your subscription", long_about = None)]
+#[command(about = "AI browser CLI - Ask ChatGPT, Gemini, Claude or Grok from your Terminal with your subscription", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -687,7 +763,7 @@ struct Cli {
     model: Option<String>,
 
     /// Select provider-specific reasoning separately from the model.
-    /// ChatGPT: auto, instant, medium, high. Gemini: extended. Claude: unsupported.
+    /// ChatGPT: auto, instant, medium, high. Gemini: extended. Claude and Grok: unsupported.
     #[arg(long = "reasoning", value_name = "REASONING")]
     reasoning: Option<String>,
 }
@@ -765,7 +841,7 @@ fn load_configured_provider() -> Result<Option<Provider>, String> {
 
     parse_configured_provider(&content).map_err(|e| {
         format!(
-            "{}. Expected format: {{\"provider\":\"chatgpt\"}} or {{\"provider\":\"gemini\"}}",
+            "{}. Expected format: {{\"provider\":\"chatgpt\"}}, {{\"provider\":\"gemini\"}}, {{\"provider\":\"claude\"}}, or {{\"provider\":\"grok\"}}",
             e
         )
     })
@@ -854,7 +930,7 @@ fn run_config_command(cli_provider: Option<Provider>) -> Result<(), String> {
                 );
             }
             println!(
-                "Set default provider with: ask-bridge config --provider <chatgpt|gemini|claude>"
+                "Set default provider with: ask-bridge config --provider <chatgpt|gemini|claude|grok>"
             );
             println!("This is a one-time override example: ask-bridge --provider gemini <prompt>");
             Ok(())
@@ -958,7 +1034,7 @@ fn resolve_session_target(
 
     if let Ok(url) = Url::parse(session) {
         let session_provider = Provider::from_url(url.as_str()).ok_or_else(|| {
-            "Session URL must use HTTPS and belong to chatgpt.com, gemini.google.com, or claude.ai"
+            "Session URL must use HTTPS and belong to chatgpt.com, gemini.google.com, claude.ai, or grok.com"
                 .to_string()
         })?;
         if !session_provider.owns_conversation_url(&url) {
@@ -3010,6 +3086,18 @@ fn validate_provider_feature_support(provider: Provider, cli: &Cli) -> Result<()
         );
     }
 
+    if provider == Provider::Grok {
+        if !cli.images.is_empty() {
+            return Err("Grok image attachments are not supported yet".to_string());
+        }
+        if !cli.files.is_empty() {
+            return Err("Grok file attachments are not supported yet".to_string());
+        }
+        if cli.image_output.is_some() {
+            return Err("Grok generated image downloads are not supported yet".to_string());
+        }
+    }
+
     Ok(())
 }
 
@@ -4612,6 +4700,20 @@ fn click_latest_copy_button(config_path: &str, provider: Provider) -> Result<(),
                 const latest = messages[messages.length - 1];
                 if (!latest) return { ok: false, reason: "No assistant message found" };
 
+                if (__IS_GROK__) {
+                    const turn = latest.closest('[id^="response-"]') || latest;
+                    const responseCopyButton = Array.from(turn.querySelectorAll('button')).find((button) => {
+                        const label = [button.getAttribute('aria-label'), button.getAttribute('title'), button.textContent]
+                            .filter(Boolean).join(' ').trim();
+                        return /^(copy response|複製回應|複製回复|复制回复)$/i.test(label);
+                    });
+                    if (responseCopyButton && isVisible(responseCopyButton)) {
+                        responseCopyButton.click();
+                        return { ok: true, label: labelOf(responseCopyButton) };
+                    }
+                    return { ok: false, reason: "Grok copy response button not found in latest turn" };
+                }
+
                 latest.scrollIntoView({ block: 'center', inline: 'nearest' });
                 for (const type of ['pointerover', 'mouseover', 'mouseenter']) {
                     latest.dispatchEvent(new MouseEvent(type, { bubbles: true, view: window }));
@@ -4640,7 +4742,8 @@ fn click_latest_copy_button(config_path: &str, provider: Provider) -> Result<(),
 
                 return { ok: false, reason: "Copy response button not found" };
             }"#
-    .replace("__RESPONSE_SELECTOR__", &response_selector);
+    .replace("__RESPONSE_SELECTOR__", &response_selector)
+    .replace("__IS_GROK__", if provider == Provider::Grok { "true" } else { "false" });
     let res = call_mcp_tool(
         config_path,
         "evaluate_script",
@@ -5447,6 +5550,7 @@ fn upload_attachments_via_file_chooser(
             Provider::ChatGpt => find_snapshot_uid(&snapshot, &["attach"], &["settings", "menu"]),
             Provider::Claude => find_snapshot_uid(&snapshot, &["attach"], &["settings", "menu"])
                 .or_else(|| find_snapshot_uid(&snapshot, &["upload"], &["drive"])),
+            Provider::Grok => None,
         }
         .ok_or_else(|| {
             format!(
@@ -5474,6 +5578,7 @@ fn upload_attachments_via_file_chooser(
                 find_snapshot_uid(&snapshot, &["upload", "file"], &["drive", "connect"])
                     .or_else(|| find_snapshot_uid(&snapshot, &["file"], &["drive", "connect"]))
             }
+            Provider::Grok => None,
         }
         .unwrap_or_else(|| menu_uid.clone());
 
@@ -6012,6 +6117,21 @@ fn switch_model(
 ) -> Result<(), String> {
     if model.trim().is_empty() {
         return Err("Empty model name".to_string());
+    }
+    if provider == Provider::Grok {
+        let aliases = grok_mode_aliases(model).ok_or_else(|| {
+            format!(
+                "Unsupported Grok mode '{model}'. Supported values: auto, fast, expert, build, heavy"
+            )
+        })?;
+        return switch_semantic_option(
+            config_path,
+            provider,
+            aliases,
+            aliases,
+            SelectionKind::Model,
+            verbose,
+        );
     }
     if provider != Provider::Claude {
         return switch_semantic_option(
@@ -7108,7 +7228,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => None,
     };
 
-    if let Err(e) = validate_provider_feature_support(provider, &cli) {
+    let feature_provider = match cli.command.as_ref() {
+        Some(Commands::Open { url: Some(url) }) | Some(Commands::Get { url: Some(url), .. }) => {
+            Provider::from_url(url).unwrap_or(provider)
+        }
+        _ => provider,
+    };
+    if let Err(e) = validate_provider_feature_support(feature_provider, &cli) {
         eprintln!("Error: {}", e);
         std::process::exit(1);
     }

@@ -1,13 +1,13 @@
 ---
 name: ask-bridge
-description: "完整使用 ask-bridge CLI 的 Agent Skill。使用 ask-bridge 將低風險、探索性 AI 研究、摘要、文件分析、程式片段分析、錯誤訊息整理、方案比較、初稿產出或可委派的背景調查交給 ChatGPT、Gemini 或 Claude 網站。當 Codex 需要透過本機 ask-bridge 命令呼叫網站型 AI、利用 ChatGPT/Gemini/Claude 網頁額度、附加檔案或圖片、切換模型、設定逾時、取回或儲存回覆、下載生成圖片、管理瀏覽器 session、更新 ask-bridge，或查詢所有參數與子命令用法時使用。"
+description: "完整使用 ask-bridge CLI 的 Agent Skill。使用 ask-bridge 將低風險、探索性 AI 研究、摘要、文件分析、程式片段分析、錯誤訊息整理、方案比較、初稿產出或可委派的背景調查交給 ChatGPT、Gemini、Claude 或 Grok 網站。當 Codex 需要透過本機 ask-bridge 命令呼叫網站型 AI、利用各 provider 網頁額度、附加檔案或圖片、切換模型、設定逾時、取回或儲存回覆、下載生成圖片、管理瀏覽器 session、更新 ask-bridge，或查詢所有參數與子命令用法時使用。"
 ---
 
 # Ask Bridge
 
 ## 核心原則
 
-使用 `ask-bridge` 把低風險、探索性、可委派的 AI 任務交給 ChatGPT、Gemini 或 Claude 網站處理，再將回覆作為本機工作流程的參考輸入。不要把 provider 回覆視為事實來源、測試結果或已完成的程式碼變更。
+使用 `ask-bridge` 把低風險、探索性、可委派的 AI 任務交給 ChatGPT、Gemini、Claude 或 Grok 網站處理，再將回覆作為本機工作流程的參考輸入。不要把 provider 回覆視為事實來源、測試結果或已完成的程式碼變更。
 
 優先把主要 Coding Agent 保留給下列工作：讀取專案脈絡、修改檔案、執行測試、驗證行為、整合結論。把 `ask-bridge` 用於背景研究、摘要、候選方案、初稿與輔助分析。
 
@@ -89,7 +89,7 @@ ask-bridge --version
 
 provider 優先序：
 
-1. CLI `--provider chatgpt|gemini|claude`
+1. CLI `--provider chatgpt|gemini|claude|grok`
 2. `~/.config/ask-bridge/config.json` 的 `provider`
 3. 內建預設 `chatgpt`
 
@@ -98,6 +98,7 @@ provider 優先序：
 ```sh
 ask-bridge config --provider gemini
 ask-bridge config --provider claude
+ask-bridge config --provider grok
 ```
 
 若要改回 ChatGPT：
@@ -124,6 +125,7 @@ ask-bridge --provider chatgpt '請摘要這段內容。'
 ask-bridge login
 ask-bridge --provider gemini login
 ask-bridge --provider claude login
+ask-bridge --provider grok login
 ask-bridge login --provider gemini
 ```
 
@@ -177,19 +179,19 @@ prompt + "\n\n" + stdin
 | 參數 | 用途 | 用法重點 |
 |---|---|---|
 | `[PROMPT]` | 要送給 provider 的文字 prompt | 可省略；若 stdin 有內容則使用 stdin；若兩者都有，會以兩個換行串接 |
-| `-p`, `--provider <PROVIDER>` | 選擇 provider | 可用 `chatgpt`、`gemini` 或 `claude`；此為 global option，可放在子命令前後；優先權高於全域設定檔 |
+| `-p`, `--provider <PROVIDER>` | 選擇 provider | 可用 `chatgpt`、`gemini`、`claude` 或 `grok`；此為 global option，可放在子命令前後；優先權高於全域設定檔 |
 | `--headless[=<HEADLESS>]` | 控制 Chrome 是否 headless | 預設 `true`；要顯示瀏覽器請用 `--headless=false`；不要寫成 `--headless false` |
 | `--new` | 開啟全新 provider 對話 | 會開啟並綁定新的唯一分頁，同時保留所有既有頁籤；用於隔離上下文 |
 | `--session <URL_OR_ID>` | 接續既有 provider 對話 | 可傳完整對話 URL 或對話 ID；`--session-id`、`--session-url` 為別名；不能與 `--new` 同時使用 |
 | `-v`, `-V`, `--version` | 顯示版本 | `-V` 是原始碼中定義的短別名；文件與一般操作優先用 `-v` 或 `--version` |
 | `--verbose` | 顯示瀏覽器自動化流程 | 用於診斷 provider UI、登入、上傳、模型切換或等待回覆問題 |
 | `-o`, `--output <FILE>` | 將最終 Markdown 回覆寫入檔案 | 同時仍會在終端機輸出渲染結果；適合保留研究紀錄 |
-| `-i`, `--image-output <IMAGE_PATH>` | 下載 provider 回覆中的生成圖片 | 可指定資料夾或檔案路徑；可搭配一般 prompt、`get` 或 `open <url>` |
-| `--image <IMAGE_FILE>` | 附加圖片檔，可重複指定 | 支援 ChatGPT 與 Claude；搭配 Gemini 會失敗 |
-| `--file <FILE>` | 附加文件檔，可重複指定 | 支援 PDF、Word、Excel、PowerPoint、純文字、Markdown、CSV、JSON、程式碼等；ChatGPT、Gemini 與 Claude 都可用 |
+| `-i`, `--image-output <IMAGE_PATH>` | 下載 provider 回覆中的生成圖片 | 可指定資料夾或檔案路徑；Grok 尚未支援 |
+| `--image <IMAGE_FILE>` | 附加圖片檔，可重複指定 | 支援 ChatGPT 與 Claude；Gemini 與 Grok 不支援 |
+| `--file <FILE>` | 附加文件檔，可重複指定 | 支援 PDF、Word、Excel、PowerPoint、純文字、Markdown、CSV、JSON、程式碼等；ChatGPT、Gemini 與 Claude 可用，Grok 尚未支援 |
 | `--timeout <SECONDS>` | 設定等待上限 | 必須是大於 0 的整數，預設 `300` 秒；同時套用於一般回覆與 `login` 登入偵測 |
-| `--model <MODEL>` | 送出 prompt 前切換模型 | 比對不分大小寫與標點；模型名稱取決於 provider UI 與帳號權限 |
-| `--reasoning <REASONING>` | 切換 provider 推理模式 | ChatGPT 支援 `auto`、`instant`、`medium`、`high`；Gemini 支援 `extended`；Claude 不支援 |
+| `--model <MODEL>` | 送出 prompt 前切換模型或模式 | 比對不分大小寫與標點；Grok 支援 `auto`、`fast`、`expert`、`build`、`heavy` |
+| `--reasoning <REASONING>` | 切換 provider 推理模式 | ChatGPT 支援 `auto`、`instant`、`medium`、`high`；Gemini 支援 `extended`；Claude 與 Grok 不支援 |
 | `-h`, `--help` | 顯示 help | 可用 `ask-bridge --help` 或 `ask-bridge help <COMMAND>` |
 
 只有 `--provider` 是 global option，可放在子命令前後。其他頂層選項搭配子命令時必須放在子命令之前，例如 `ask-bridge --timeout 600 login`、`ask-bridge --output /tmp/reply.md get <url>`；不要寫成 `ask-bridge login --timeout 600` 或 `ask-bridge get <url> --output ...`。
@@ -204,13 +206,14 @@ ask-bridge --provider chatgpt '請分析這段程式碼的風險。'
 ask-bridge -p chatgpt '請整理這份文件的待辦。'
 ```
 
-使用 Gemini 或 Claude 時明確指定 provider：
+使用 Gemini、Claude 或 Grok 時明確指定 provider：
 
 ```sh
 ask-bridge --provider gemini '請比較這三個實作方向的風險與取捨。'
 ask-bridge -p gemini '請摘要這份文件。' --file notes.md
 ask-bridge --provider claude '請初步分析這段程式碼的風險。'
 ask-bridge -p claude '請摘要這份文件。' --file notes.md
+ask-bridge --provider grok '請搜尋近期資訊並整理重點。'
 ```
 
 選擇原則：
@@ -334,6 +337,8 @@ ask-bridge --provider claude '用幾句話介紹 Rust。' --model Sonnet
 
 ChatGPT 的 `--reasoning` 支援 `auto`、`instant`、`medium`、`high` 與對應中文別名；Gemini 只支援 `extended`，且不能搭配非 Pro 模型；Claude 不支援 `--reasoning`。
 
+Grok 的 `--model` 對應網頁上的 `auto`、`fast`、`expert`、`build`、`heavy` 模式；`--reasoning`、`--image`、`--file` 與 `--image-output` 尚未支援。
+
 模型只比對 provider 選單的主標籤，忽略副標題與 badge，且不會把不存在的舊版本自動對應到其他版本。若切換失敗，應依錯誤列出的目前選項修正參數，不要猜測替代模型名稱。舊用法 `--model 高` 與 `--model 延伸思考` 暫時可用，但應改成 `--reasoning`。
 
 ## ChatGPT Agent 提及語法
@@ -345,7 +350,7 @@ ChatGPT 的 `--reasoning` 支援 `auto`、`instant`、`medium`、`high` 與對�
 - **格式**：`@Agent名稱 prompt正文`
 - **名稱限制**：Agent 名稱必須由 1 至 10 個非空白字元組成。
 - **正文限制**：Agent 名稱後必須至少有一個空白，且去除前導空白後的正文不可為空。
-- **Provider 限制**：特殊處理只適用於 ChatGPT；Gemini 與 Claude 會將相同內容視為一般文字 prompt。
+- **Provider 限制**：特殊處理只適用於 ChatGPT；Gemini、Claude 與 Grok 會將相同內容視為一般文字 prompt。
 - **Fallback**：格式不符合時，不會觸發 Agent mention 流程，而會按照一般 prompt 處理。
 
 ### 使用範例

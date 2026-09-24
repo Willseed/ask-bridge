@@ -148,6 +148,9 @@
         ].filter(Boolean).join(' '))
       ));
     }
+    if (provider === 'grok') {
+      return document.querySelector('#model-select-trigger');
+    }
     return undefined;
   }
 
@@ -206,6 +209,12 @@
       }
     } else if (config.provider === 'gemini') {
       picker = findPicker(config.provider);
+    } else if (config.provider === 'grok') {
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        picker = findPicker(config.provider);
+        if (picker) break;
+        await sleep(250);
+      }
     }
 
     if (!picker) {

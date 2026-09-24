@@ -1,6 +1,6 @@
 # 快速開始
 
-本文件說明如何安裝 `ask-bridge`，並透過 Chrome 自動操作 ChatGPT、Gemini 或 Claude。未設定全域 provider 時預設為 ChatGPT，可用 `--provider gemini`、`--provider claude` 或全域設定檔切換。
+本文件說明如何安裝 `ask-bridge`，並透過 Chrome 自動操作 ChatGPT、Gemini、Claude 或 Grok。未設定全域 provider 時預設為 ChatGPT，可用 `--provider gemini`、`--provider claude`、`--provider grok` 或全域設定檔切換。
 
 ## 前置需求
 
@@ -41,7 +41,7 @@ Chrome 會使用專屬 profile 開啟，profile 路徑為：
 ~/.config/ask-bridge/chrome-profile
 ```
 
-在瀏覽器視窗登入 ChatGPT 後，回到終端機按 Enter。
+在瀏覽器視窗登入 ChatGPT。工具會自動偵測登入狀態，無須回到終端機按 Enter。
 
 若要登入 Gemini：
 
@@ -49,7 +49,7 @@ Chrome 會使用專屬 profile 開啟，profile 路徑為：
 ask-bridge --provider gemini login
 ```
 
-在瀏覽器視窗登入 Gemini 後，回到終端機按 Enter。
+在瀏覽器視窗登入 Gemini。工具會自動偵測登入狀態，無須回到終端機按 Enter。
 
 若要登入 Claude：
 
@@ -57,15 +57,24 @@ ask-bridge --provider gemini login
 ask-bridge --provider claude login
 ```
 
-在瀏覽器視窗登入 claude.ai 後，回到終端機按 Enter。
+在瀏覽器視窗登入 claude.ai。工具會自動偵測登入狀態，無須回到終端機按 Enter。
+
+若要登入 Grok：
+
+```sh
+ask-bridge --provider grok login
+```
+
+在瀏覽器視窗登入 grok.com。工具會自動偵測登入狀態，無須回到終端機按 Enter。
 
 ## 全域 provider 設定
 
-若希望未指定 `--provider` 時預設使用 Gemini 或 Claude，可執行：
+若希望未指定 `--provider` 時預設使用 Gemini、Claude 或 Grok，可執行：
 
 ```sh
 ask-bridge config --provider gemini
 ask-bridge config --provider claude
+ask-bridge config --provider grok
 ```
 
 若要改回 ChatGPT：
@@ -86,6 +95,7 @@ ask-bridge config --provider chatgpt
 ask-bridge "用一段話解釋 Rust ownership。"
 ask-bridge --provider gemini "用一段話解釋 Rust ownership。"
 ask-bridge --provider claude "用一段話解釋 Rust ownership。"
+ask-bridge --provider grok "用一段話解釋 Rust ownership。"
 ```
 
 一般提問預設會使用 headless Chrome，並把所選 provider 的回覆輸出到終端機。
@@ -127,6 +137,7 @@ ask-bridge --session-url "https://chatgpt.com/c/conversation-uuid" "請產出下
 
 `--session`、`--session-id` 與 `--session-url` 是相同參數的別名，不能與
 `--new` 同時使用。完整 URL 會自動辨識 provider；既有頁籤都會保留。
+Grok 對話網址格式為 `https://grok.com/c/<ID>`。
 
 ## 透過 pipe 傳入內容
 
@@ -142,11 +153,11 @@ cat README.md | ask-bridge "摘要這份文件。"
 
 ## 附上圖片或文件
 
-`ask-bridge` 支援把本機檔案當作附件直接上傳給所選 provider，不必透過 pipe 把內容塞進 prompt。Gemini 目前支援 `--file` 文件附件；`--image` 圖片輸入目前支援 ChatGPT 與 Claude。
+`ask-bridge` 支援把本機檔案當作附件直接上傳給所選 provider，不必透過 pipe 把內容塞進 prompt。Grok 附件尚未支援；Gemini 目前支援 `--file` 文件附件；`--image` 圖片輸入目前支援 ChatGPT 與 Claude。
 
 ### 附上圖片
 
-使用 `--image`（可重複指定）。此功能目前支援 ChatGPT 與 Claude；搭配 `--provider gemini` 使用會立即回報錯誤。
+使用 `--image`（可重複指定）。此功能目前支援 ChatGPT 與 Claude；搭配 Gemini 或 Grok 使用會立即回報錯誤。
 
 ```sh
 ask-bridge "請描述這張圖片。" --image screenshot.png
@@ -179,6 +190,7 @@ ask-bridge "快速翻譯這段話。" --reasoning instant
 ask-bridge --provider gemini "用幾句話介紹 Rust。" --model "3.6 Flash"
 ask-bridge --provider gemini "證明這個數學問題。" --model "3.1 Pro" --reasoning extended
 ask-bridge --provider claude "用幾句話介紹 Rust。" --model Sonnet
+ask-bridge --provider grok "快速整理這個主題。" --model fast
 ```
 
 推理值：
@@ -186,6 +198,7 @@ ask-bridge --provider claude "用幾句話介紹 Rust。" --model Sonnet
 - **ChatGPT**：`auto`、`instant`、`medium`、`high`，亦接受對應中文別名。
 - **Gemini**：`extended`，只能單獨使用或搭配 Pro 模型。
 - **Claude**：不支援 `--reasoning`，原有 `--model` 行為不變。
+- **Grok**：`--model` 可選 `auto`、`fast`、`expert`、`build` 或 `heavy`；不支援 `--reasoning`、附件與生成圖片下載。
 
 模型名稱只與 provider 選單的主標籤比對，忽略大小寫、標點、副標題與 badge；不會把舊版本名稱改選為其他版本。
 

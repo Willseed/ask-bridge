@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### 🚀 新增 (Added)
+- 新增 Grok (`grok.com`) 網頁 provider，支援登入狀態偵測、分頁管理、文字問答、接續對話、Markdown 回覆擷取與 Grok 模式切換。
+- Grok `--model` 支援 `auto`、`fast`、`expert`、`build`、`heavy` 模式；尚未支援的附件、圖片下載與 `--reasoning` 會提前回報錯誤。
+
 ---
 
 ## [0.2.5] - 2026-07-10
