@@ -153,15 +153,16 @@ cat README.md | ask-bridge "摘要這份文件。"
 
 ## 附上圖片或文件
 
-`ask-bridge` 支援把本機檔案當作附件直接上傳給所選 provider，不必透過 pipe 把內容塞進 prompt。Grok 附件尚未支援；Gemini 目前支援 `--file` 文件附件；`--image` 圖片輸入目前支援 ChatGPT 與 Claude。
+`ask-bridge` 支援把本機檔案當作附件直接上傳給所選 provider，不必透過 pipe 把內容塞進 prompt。Grok 支援 `--image` 圖片輸入，但不支援 `--file` 文件附件；Gemini 目前支援 `--file` 文件附件，不支援圖片輸入。
 
 ### 附上圖片
 
-使用 `--image`（可重複指定）。此功能目前支援 ChatGPT 與 Claude；搭配 Gemini 或 Grok 使用會立即回報錯誤。
+使用 `--image`（可重複指定）。此功能支援 ChatGPT、Claude 與 Grok；搭配 Gemini 使用會立即回報錯誤。
 
 ```sh
 ask-bridge "請描述這張圖片。" --image screenshot.png
 ask-bridge "比較這兩張圖。" --image v1.png --image v2.png
+ask-bridge --provider grok "請描述這張圖片。" --image photo.png
 ```
 
 ### 附上文件
@@ -198,7 +199,7 @@ ask-bridge --provider grok "快速整理這個主題。" --model fast
 - **ChatGPT**：`auto`、`instant`、`medium`、`high`，亦接受對應中文別名。
 - **Gemini**：`extended`，只能單獨使用或搭配 Pro 模型。
 - **Claude**：不支援 `--reasoning`，原有 `--model` 行為不變。
-- **Grok**：`--model` 可選 `auto`、`fast`、`expert`、`build` 或 `heavy`；不支援 `--reasoning`、附件與生成圖片下載。
+- **Grok**：`--model` 可選 `auto`、`fast`、`expert`、`build` 或 `heavy`；支援 `--image`，不支援 `--reasoning`、`--file` 與生成圖片下載。
 
 模型名稱只與 provider 選單的主標籤比對，忽略大小寫、標點、副標題與 badge；不會把舊版本名稱改選為其他版本。
 

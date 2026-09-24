@@ -3113,9 +3113,6 @@ fn validate_provider_feature_support(provider: Provider, cli: &Cli) -> Result<()
     }
 
     if provider == Provider::Grok {
-        if !cli.images.is_empty() {
-            return Err("Grok image attachments are not supported yet".to_string());
-        }
         if !cli.files.is_empty() {
             return Err("Grok file attachments are not supported yet".to_string());
         }
@@ -3840,6 +3837,76 @@ mod tests {
         ])
         .unwrap();
         assert!(validate_provider_feature_support(Provider::Claude, &cli).is_ok());
+    }
+
+    #[test]
+    fn allows_grok_image_attachments() {
+        let cli = Cli::try_parse_from([
+            "ask-bridge",
+            "--provider",
+            "grok",
+            "--image",
+            "first.png",
+            "--image",
+            "second.jpg",
+            "describe",
+        ])
+        .unwrap();
+        assert!(validate_provider_feature_support(Provider::Grok, &cli).is_ok());
+    }
+
+    #[test]
+    fn keeps_grok_document_and_image_output_attachments_unsupported() {
+        let file_cli = Cli::try_parse_from([
+            "ask-bridge",
+            "--provider",
+            "grok",
+            "--file",
+            "notes.pdf",
+            "summarize",
+        ])
+        .unwrap();
+        assert!(validate_provider_feature_support(Provider::Grok, &file_cli).is_err());
+
+        let image_output_cli = Cli::try_parse_from([
+            "ask-bridge",
+            "--provider",
+            "grok",
+            "--image-output",
+            "generated.png",
+            "draw",
+        ])
+        .unwrap();
+        assert!(validate_provider_feature_support(Provider::Grok, &image_output_cli).is_err());
+    }
+
+    #[test]
+    fn grok_attachment_confirmation_requires_exact_names_and_counts() {
+        let expected = vec!["photo.png".to_string(), "photo-copy.png".to_string()];
+        let partial = vec!["photo-copy.png".to_string()];
+        let complete = vec!["photo.png".to_string(), "photo-copy.png".to_string()];
+
+        assert!(!attachment_names_cover_expected(&expected, &partial));
+        assert!(attachment_names_cover_expected(&expected, &complete));
+        assert!(!attachment_names_cover_expected(
+            &["a.png".to_string()],
+            &["Fast".to_string()]
+        ));
+        assert!(!attachment_names_cover_expected(
+            &["photo.png".to_string(), "photo.png".to_string()],
+            &["photo.png".to_string()]
+        ));
+    }
+
+    #[test]
+    fn grok_attachment_confirmation_uses_visible_composer_preview_list() {
+        let script = composer_attachment_names_js();
+
+        assert!(script.contains("findVisibleComposer(composerSelectors)"));
+        assert!(script.contains("composer.closest('.query-bar')"));
+        assert!(script.contains("[role=\"list\"] > [role=\"listitem\"]"));
+        assert!(!script.contains("document.body"));
+        assert!(!script.contains("includes("));
     }
 
     #[test]
@@ -5563,11 +5630,11 @@ fn wait_for_attachment_indicator(
     let file_stem_json = serde_json::to_string(file_stem)
         .map_err(|e| format!("Failed to serialize file stem: {}", e))?;
     let js = r#"() => {
-        const fileName = __FILE_NAME__;
-        const fileStem = __FILE_STEM__;
-        const text = document.body.innerText || '';
-        return text.includes(fileName) || text.includes(fileStem);
-    }"#
+            const fileName = __FILE_NAME__;
+            const fileStem = __FILE_STEM__;
+            const text = document.body.innerText || '';
+            return text.includes(fileName) || text.includes(fileStem);
+        }"#
     .replace("__FILE_NAME__", &file_name_json)
     .replace("__FILE_STEM__", &file_stem_json);
 
@@ -5599,6 +5666,127 @@ fn wait_for_attachment_indicator(
         provider.display_name(),
         file_name
     ))
+}
+
+fn composer_attachment_names_js() -> &'static str {
+    r#"() => {
+        const composerSelectors = __COMPOSER_SELECTORS__;
+        const isVisible = (el) => {
+            if (!el || el.disabled || el.getAttribute('aria-disabled') === 'true') return false;
+            const style = window.getComputedStyle(el);
+            if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+            const rect = el.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0;
+        };
+        __VISIBLE_COMPOSER_LOOKUP__
+        const composer = findVisibleComposer(composerSelectors);
+        const container = composer && composer.closest('.query-bar');
+        if (!container) return null;
+        const current = Array.from(container.querySelectorAll('[role="list"] > [role="listitem"]'))
+            .map((item) => (item.innerText || item.textContent || '').trim())
+            .filter(Boolean);
+        return {
+            baseline: window.__grok_attachment_baseline,
+            current
+        };
+    }"#
+}
+
+fn attachment_names_cover_expected(expected: &[String], actual: &[String]) -> bool {
+    let mut remaining = actual.to_vec();
+    expected.iter().all(|expected_name| {
+        if let Some(index) = remaining
+            .iter()
+            .position(|actual_name| actual_name == expected_name)
+        {
+            remaining.remove(index);
+            true
+        } else {
+            false
+        }
+    })
+}
+
+fn wait_for_grok_attachments(
+    config_path: &str,
+    image_paths: &[String],
+    verbose: bool,
+) -> Result<(), String> {
+    let expected_names = image_paths
+        .iter()
+        .map(|path| {
+            Path::new(path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    format!(
+                        "Could not read image filename from '{}': invalid path",
+                        path
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut required_names = expected_names.clone();
+    let js = composer_attachment_names_js()
+        .replace(
+            "__COMPOSER_SELECTORS__",
+            &Provider::Grok.composer_selectors_json(),
+        )
+        .replace("__VISIBLE_COMPOSER_LOOKUP__", visible_composer_lookup_js());
+
+    for _ in 0..30 {
+        let check_res = call_mcp_tool(
+            config_path,
+            "evaluate_script",
+            serde_json::json!({ "function": js }),
+        )?;
+        let snapshot = parse_script_result(&check_res).ok();
+        let baseline_names = snapshot
+            .as_ref()
+            .and_then(|parsed| parsed.get("baseline"))
+            .and_then(Value::as_array)
+            .map(|names| {
+                names
+                    .iter()
+                    .filter_map(|name| name.as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            });
+        let actual_names = snapshot
+            .as_ref()
+            .and_then(|parsed| parsed.get("current"))
+            .and_then(Value::as_array)
+            .map(|names| {
+                names
+                    .iter()
+                    .filter_map(|name| name.as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            });
+
+        if let Some(baseline_names) = baseline_names {
+            required_names.clone_from(&baseline_names);
+            required_names.extend(expected_names.iter().cloned());
+        } else {
+            return Err("Could not read Grok's pre-upload composer attachment list".to_string());
+        }
+
+        if let Some(actual_names) = actual_names
+            && attachment_names_cover_expected(&required_names, &actual_names)
+        {
+            if verbose {
+                for file_name in &expected_names {
+                    println!("Grok accepted attachment '{}'", file_name);
+                }
+            }
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+
+    Err(
+        "Timed out waiting for Grok to show every requested image attachment by exact filename"
+            .to_string(),
+    )
 }
 
 fn upload_attachments_via_file_chooser(
@@ -5843,6 +6031,18 @@ fn upload_attachments_to_provider(
     let files_json_str = serde_json::to_string(&files_json)
         .map_err(|e| format!("Failed to serialize attachment data: {}", e))?;
     let composer_selectors = provider.composer_selectors_json();
+    let grok_attachment_baseline_capture = if provider == Provider::Grok {
+        "            const grokComposer = el.closest('.query-bar');\n\
+            if (!grokComposer) {\n\
+                window.__upload_images_status = 'error: Grok composer attachment list not found';\n\
+                return;\n\
+            }\n\
+            window.__grok_attachment_baseline = Array.from(grokComposer.querySelectorAll('[role=\"list\"] > [role=\"listitem\"]'))\n\
+                .map((item) => (item.innerText || item.textContent || '').trim())\n\
+                .filter(Boolean);\n"
+    } else {
+        ""
+    };
     // Build JS without raw strings to avoid r#"..."# termination conflicts
     let js = "() => {\n".to_string()
         + "    window.__upload_images_status = 'pending';\n"
@@ -5878,6 +6078,7 @@ fn upload_attachments_to_provider(
         + "                window.__upload_images_status = 'error: composer not found';\n"
         + "                return;\n"
         + "            }\n"
+        + grok_attachment_baseline_capture
         + "            el.focus();\n"
         + "            const fileInputs = Array.from(document.querySelectorAll('input[type=\"file\"]'));\n"
         + "            // Pick the file input whose `accept` attribute covers every attached file.\n"
@@ -5969,7 +6170,11 @@ fn upload_attachments_to_provider(
     // Give the UI a moment to render the attachments before typing the prompt
     thread::sleep(Duration::from_millis(800));
 
-    if provider == Provider::Gemini {
+    if provider == Provider::Grok {
+        // Require the visible composer to show every new image chip after upload.
+        // The pre-upload list prevents stale chips with the same name from passing.
+        wait_for_grok_attachments(config_path, image_paths, verbose)?;
+    } else if provider == Provider::Gemini {
         // Gemini renders image attachments as thumbnails without a stable filename in
         // the accessible text. Text/document chips do expose their filename, so keep
         // the stricter post-upload check for `--file` attachments only.

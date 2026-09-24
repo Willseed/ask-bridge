@@ -37,7 +37,7 @@ Unlike typical API clients, `ask-bridge` operates inside a real Chrome browser w
 - **🌀 TUI Thinking Animation**: Displays a rotating spinner while waiting for the provider to reply, then clears it once output starts.
 - **🧠 Intelligent Tab Management**: Reuses existing provider tabs if open, focuses them, or opens new ones, avoiding tab clutter.
 - **🖥️ Pipe & Stdin Support**: Supports piping prompts via `stdin` (e.g. `cat report.txt | ask-bridge "summarize this"`).
-- **📎 Image & File Attachments**: Attach local images with `--image` (supported on ChatGPT and Claude), or documents (PDF, Word, Excel, plain text, Markdown, JSON, etc.) with `--file`; Gemini supports `--file` and rejects `--image`. Grok attachments are not supported yet.
+- **📎 Image & File Attachments**: Attach local images with `--image` (supported on ChatGPT, Claude, and Grok), or documents (PDF, Word, Excel, plain text, Markdown, JSON, etc.) with `--file`; Gemini supports `--file` and rejects `--image`. Grok does not support document attachments yet.
 - **🔀 Model and Reasoning Selection**: Use `--model` for provider models and `--reasoning` for ChatGPT reasoning effort or Gemini Extended Thinking.
 - **Resume Conversations**: Use `--session`, `--session-id`, or `--session-url` to continue an existing provider conversation with a new terminal prompt.
 - **Response Timeout**: Use `--timeout <seconds>` to control how long to wait for a provider response, defaulting to `300` seconds.
@@ -311,19 +311,20 @@ Instead of piping file contents into the prompt, you can upload local files as a
 
 #### Attach images
 
-Use `--image` (repeatable) to attach one or more local images. This currently supports ChatGPT and Claude; Gemini and Grok image input are not enabled and exit with an explicit error when selected.
+Use `--image` (repeatable) to attach one or more local images. This supports ChatGPT, Claude, and Grok; Gemini image input is not enabled and exits with an explicit error when selected.
 
 ```bash
 ask-bridge "Describe this image." --image screenshot.png
 ask-bridge "Compare these two images." --image v1.png --image v2.png
 ask-bridge --provider claude "Describe this image." --image screenshot.png
+ask-bridge --provider grok "Describe this image." --image photo.png
 ```
 
 Supported formats include PNG, JPEG, GIF, WebP, SVG, BMP, and more.
 
 #### Attach documents
 
-Use `--file` (repeatable) to attach documents such as PDF, Word, Excel, PowerPoint, plain text, Markdown, CSV, JSON, or source code. This flow supports ChatGPT, Gemini, and Claude. Grok attachments are not supported yet.
+Use `--file` (repeatable) to attach documents such as PDF, Word, Excel, PowerPoint, plain text, Markdown, CSV, JSON, or source code. This flow supports ChatGPT, Gemini, and Claude. Grok document attachments are not supported yet.
 
 ```bash
 ask-bridge "Summarize this PDF." --file report.pdf

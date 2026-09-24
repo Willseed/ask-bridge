@@ -36,7 +36,7 @@
 - **思考動畫**：等待 provider 回覆時，在終端機顯示旋轉 spinner，開始輸出內容後自動清除。
 - **智慧分頁管理**：可重用既有 provider 分頁、聚焦分頁，或開啟新分頁，避免分頁過度增加。
 - **Pipe 與 stdin 支援**：支援透過 standard input 傳入 prompt，例如 `cat report.txt | ask-bridge "summarize this"`。
-- **圖片與文件上傳**：可透過 `--image` 附上圖片（支援 ChatGPT 與 Claude），或透過 `--file` 附上文件（PDF、Word、Excel、純文字、Markdown、JSON 等皆可），一次可指定多個檔案；Gemini 目前支援 `--file`，不支援 `--image` 圖片輸入。
+- **圖片與文件上傳**：可透過 `--image` 附上圖片（支援 ChatGPT、Claude 與 Grok），或透過 `--file` 附上文件（PDF、Word、Excel、純文字、Markdown、JSON 等皆可），一次可指定多個檔案；Gemini 目前支援 `--file`，不支援 `--image` 圖片輸入。
 - **模型與推理模式切換**：使用 `--model` 選模型或 Grok 模式，並以 `--reasoning` 分別控制 ChatGPT 推理強度或 Gemini 延伸思考。
 - **接續既有對話**：使用 `--session`、`--session-id` 或 `--session-url` 指定既有對話，再從終端機送出新的 prompt；Grok 對話使用 `grok.com/c/<ID>`。
 - **回應超時**：使用 `--timeout <秒數>` 設定等待回應上限，預設為 `300` 秒。
@@ -308,19 +308,20 @@ cat src/main.rs | ask-bridge "這段 Rust code 有記憶體洩漏風險嗎？"
 
 #### 附上圖片
 
-使用 `--image` 附上一或多張本機圖片（可重複指定）。此功能目前支援 ChatGPT 與 Claude；Gemini 與 Grok 圖片輸入尚未支援，搭配這兩個 provider 使用會立即回報錯誤。
+使用 `--image` 附上一或多張本機圖片（可重複指定）。此功能支援 ChatGPT、Claude 與 Grok；Gemini 圖片輸入尚未支援，搭配 Gemini 使用會立即回報錯誤。Grok 網頁端支援圖片輸入，但不支援文件附件。
 
 ```bash
 ask-bridge "請描述這張圖片的內容。" --image screenshot.png
 ask-bridge "比較這兩張圖的差異。" --image v1.png --image v2.png
 ask-bridge --provider claude "請描述這張圖片的內容。" --image screenshot.png
+ask-bridge --provider grok "請描述這張圖片的內容。" --image photo.png
 ```
 
 支援的格式包含 PNG、JPEG、GIF、WebP、SVG、BMP 等。
 
 #### 附上文件
 
-使用 `--file` 附上一或多份本機文件（可重複指定），例如 PDF、Word、Excel、PowerPoint、純文字、Markdown、CSV、JSON、程式碼等。ChatGPT、Gemini 與 Claude 都支援此流程；Grok 附件尚未支援。
+使用 `--file` 附上一或多份本機文件（可重複指定），例如 PDF、Word、Excel、PowerPoint、純文字、Markdown、CSV、JSON、程式碼等。ChatGPT、Gemini 與 Claude 都支援此流程；Grok 尚不支援文件附件。
 
 ```bash
 ask-bridge "請摘要這份 PDF 的重點。" --file report.pdf
@@ -356,7 +357,7 @@ ask-bridge --provider grok "快速整理這個主題。" --model fast
 - **ChatGPT**：`--reasoning` 支援 `auto`、`instant`、`medium`、`high`，也接受 `智慧`、`即時`、`中`、`中等`、`高` 等對應別名。
 - **Gemini**：`--reasoning extended` 選擇 Extended Thinking；可省略 `--model`，或搭配實際存在的 Pro 模型。
 - **Claude**：不支援 `--reasoning`；`--model` 的 Sonnet、Opus、Haiku 選擇流程維持不變。
-- **Grok**：`--model` 支援 `auto`、`fast`、`expert`、`build`、`heavy`；不支援 `--reasoning`、`--image`、`--file` 與 `--image-output`。
+- **Grok**：`--model` 支援 `auto`、`fast`、`expert`、`build`、`heavy`；支援 `--image`，不支援 `--reasoning`、`--file` 與 `--image-output`。
 
 模型比對只使用選單的主標籤，忽略副標題與 badge；比對仍不分大小寫與標點。工具不會把舊版模型名稱自動改選為其他版本。若主標籤不存在，錯誤會列出目前讀到的 provider 選項，並在送出 prompt 前中止。
 

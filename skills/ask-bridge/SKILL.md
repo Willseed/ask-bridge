@@ -187,7 +187,7 @@ prompt + "\n\n" + stdin
 | `--verbose` | 顯示瀏覽器自動化流程 | 用於診斷 provider UI、登入、上傳、模型切換或等待回覆問題 |
 | `-o`, `--output <FILE>` | 將最終 Markdown 回覆寫入檔案 | 同時仍會在終端機輸出渲染結果；適合保留研究紀錄 |
 | `-i`, `--image-output <IMAGE_PATH>` | 下載 provider 回覆中的生成圖片 | 可指定資料夾或檔案路徑；Grok 尚未支援 |
-| `--image <IMAGE_FILE>` | 附加圖片檔，可重複指定 | 支援 ChatGPT 與 Claude；Gemini 與 Grok 不支援 |
+| `--image <IMAGE_FILE>` | 附加圖片檔，可重複指定 | 支援 ChatGPT、Claude 與 Grok；Gemini 不支援 |
 | `--file <FILE>` | 附加文件檔，可重複指定 | 支援 PDF、Word、Excel、PowerPoint、純文字、Markdown、CSV、JSON、程式碼等；ChatGPT、Gemini 與 Claude 可用，Grok 尚未支援 |
 | `--timeout <SECONDS>` | 設定等待上限 | 必須是大於 0 的整數，預設 `300` 秒；同時套用於一般回覆與 `login` 登入偵測 |
 | `--model <MODEL>` | 送出 prompt 前切換模型或模式 | 比對不分大小寫與標點；Grok 支援 `auto`、`fast`、`expert`、`build`、`heavy` |
@@ -274,12 +274,13 @@ ask-bridge '請比較這兩份文件的差異。' --file old.md --file new.md
 ask-bridge --provider gemini '請摘要這份 PDF。' --file report.pdf
 ```
 
-對圖片使用 `--image`，目前支援 ChatGPT 與 Claude：
+對圖片使用 `--image`，目前支援 ChatGPT、Claude 與 Grok：
 
 ```sh
 ask-bridge '請描述這張截圖中的 UI 問題，並列出可能的 CSS 原因。' --image screenshot.png
 ask-bridge '請比較這兩張圖的差異。' --image before.png --image after.png
 ask-bridge --provider claude '請描述這張截圖中的 UI 問題。' --image screenshot.png
+ask-bridge --provider grok '請描述這張圖片的內容。' --image photo.png
 ```
 
 同時附加圖片與文件時，使用 ChatGPT 或 Claude：
@@ -337,7 +338,7 @@ ask-bridge --provider claude '用幾句話介紹 Rust。' --model Sonnet
 
 ChatGPT 的 `--reasoning` 支援 `auto`、`instant`、`medium`、`high` 與對應中文別名；Gemini 只支援 `extended`，且不能搭配非 Pro 模型；Claude 不支援 `--reasoning`。
 
-Grok 的 `--model` 對應網頁上的 `auto`、`fast`、`expert`、`build`、`heavy` 模式；`--reasoning`、`--image`、`--file` 與 `--image-output` 尚未支援。
+Grok 的 `--model` 對應網頁上的 `auto`、`fast`、`expert`、`build`、`heavy` 模式；支援 `--image` 圖片輸入，但 `--reasoning`、`--file` 與 `--image-output` 尚未支援。
 
 模型只比對 provider 選單的主標籤，忽略副標題與 badge，且不會把不存在的舊版本自動對應到其他版本。若切換失敗，應依錯誤列出的目前選項修正參數，不要猜測替代模型名稱。舊用法 `--model 高` 與 `--model 延伸思考` 暫時可用，但應改成 `--reasoning`。
 
