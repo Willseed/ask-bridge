@@ -41,13 +41,15 @@ impl LoginSignals {
     fn state(self, provider: Provider) -> LoginState {
         if self.auth_path {
             LoginState::LoggedOut
+        } else if provider == Provider::Grok && self.auth_control {
+            LoginState::LoggedOut
         } else if self.account {
             LoginState::LoggedIn
         } else if !self.stable {
             LoginState::Unknown
         } else if self.auth_control {
             LoginState::LoggedOut
-        } else if self.composer && provider == Provider::ChatGpt {
+        } else if self.composer && matches!(provider, Provider::ChatGpt | Provider::Grok) {
             LoginState::LoggedIn
         } else {
             LoginState::Unknown
@@ -170,6 +172,7 @@ impl Provider {
                 r#"() => {
                     return document.querySelector('[data-testid="chat-input"] [role="textbox"]') !== null ||
                            document.querySelector('[role="textbox"][contenteditable="true"][aria-label*="Ask Grok"]') !== null ||
+                           document.querySelector('textarea[aria-label*="Grok"]') !== null ||
                            document.querySelector('button[data-testid="chat-submit"]') !== null ||
                            document.querySelector('a[href*="/sign-in"], a[href*="/login"]') !== null ||
                            /Sign in|Log in|登入/i.test(document.body.innerText || '');
@@ -334,19 +337,41 @@ impl Provider {
                         return style.display !== 'none' && style.visibility !== 'hidden' &&
                             style.opacity !== '0' && rect.width > 0 && rect.height > 0;
                     };
-                    const composer = document.querySelector('[role="textbox"][contenteditable="true"][aria-label*="Ask Grok"]') ||
-                        document.querySelector('[data-testid="chat-input"] [role="textbox"]');
+                    const composerSelectors = [
+                        'textarea[aria-label*="Grok"]',
+                        '[role="textbox"][contenteditable="true"][aria-label*="Ask Grok"]',
+                        '[data-testid="chat-input"] [role="textbox"]'
+                    ];
+                    const composer = composerSelectors
+                        .flatMap((selector) => Array.from(document.querySelectorAll(selector)))
+                        .find((el) => isVisible(el) && !el.disabled && el.getAttribute('aria-disabled') !== 'true');
                     const account = Array.from(document.querySelectorAll('button[aria-haspopup="menu"]'))
                         .find((el) => {
                             const label = [el.getAttribute('aria-label'), el.textContent].filter(Boolean).join(' ').trim();
                             return isVisible(el) && label.length > 0 &&
-                                !/model|選擇模型|附加|attach|more actions/i.test(label);
+                                !/model|選擇模型|附加|attach|more actions|settings|設定|設置|privacy|搜尋|search/i.test(label);
                         });
+                    const isConversationContent = (el) => Boolean(el.closest(
+                        '[data-testid="assistant-message"], [data-testid="user-message"], [data-testid^="response-"], [data-testid*="message"], [data-message-author-role]'
+                    ));
                     const signIn = Array.from(document.querySelectorAll('a, button'))
-                        .some((el) => isVisible(el) && /^(log in|login|sign in|sign up|continue with x|登入|登錄|登录)$/i.test([
-                            el.getAttribute('aria-label'), el.textContent
-                        ].filter(Boolean).join(' ').trim()));
-                    const authPath = /^\/(login|sign-in|signup|auth)(\/|$)/i.test(window.location.pathname);
+                        .some((el) => {
+                            if (!isVisible(el) || isConversationContent(el)) return false;
+                            const label = [el.getAttribute('aria-label'), el.textContent].filter(Boolean).join(' ').trim();
+                            const href = el.getAttribute('href') || '';
+                            if (/^(log in|login|sign in|sign up|continue with x|登入|登錄|登录|註冊)$/i.test(label)) {
+                                return true;
+                            }
+                            if (!href) return false;
+                            try {
+                                const url = new URL(href, window.location.href);
+                                return url.origin === window.location.origin &&
+                                    /^\/(sign-in|sign-up|login|signup)(\/|$)/i.test(url.pathname);
+                            } catch (e) {
+                                return false;
+                            }
+                        });
+                    const authPath = /^\/(login|sign-in|sign-up|signup|auth)(\/|$)/i.test(window.location.pathname);
                     return {
                         account: Boolean(account),
                         auth_control: Boolean(signIn),
@@ -409,6 +434,7 @@ impl Provider {
             }
             Provider::Grok => {
                 r#"[
+                    "textarea[aria-label*=\"Grok\"]",
                     "[role=\"textbox\"][contenteditable=\"true\"][aria-label*=\"Ask Grok\"]",
                     "[data-testid=\"chat-input\"] [role=\"textbox\"]"
                 ]"#
@@ -4091,6 +4117,56 @@ mod tests {
     }
 
     #[test]
+    fn grok_auth_control_overrides_generic_account_menu() {
+        let signals = LoginSignals {
+            account: true,
+            auth_control: true,
+            auth_path: false,
+            composer: true,
+            stable: true,
+        };
+
+        assert_eq!(signals.state(Provider::Grok), LoginState::LoggedOut);
+    }
+
+    #[test]
+    fn grok_login_detection_scopes_auth_links_to_site_ui() {
+        let script = Provider::Grok.login_signals_js();
+
+        assert!(script.contains("isConversationContent"));
+        assert!(script.contains(r#"[data-testid="assistant-message"]"#));
+        assert!(script.contains("|| isConversationContent(el)"));
+        assert!(script.contains("url.origin === window.location.origin"));
+        assert!(script.contains(r#"url.pathname);"#));
+        assert!(script.contains("login|sign-in|sign-up|signup|auth"));
+    }
+
+    #[test]
+    fn grok_composer_detection_skips_hidden_candidates() {
+        let login_script = Provider::Grok.login_signals_js();
+        let lookup_script = visible_composer_lookup_js();
+
+        assert!(
+            login_script.contains(
+                ".flatMap((selector) => Array.from(document.querySelectorAll(selector)))"
+            )
+        );
+        assert!(login_script.contains(".find((el) => isVisible(el) && !el.disabled"));
+        assert!(
+            lookup_script.contains(
+                ".flatMap((selector) => Array.from(document.querySelectorAll(selector)))"
+            )
+        );
+        assert!(lookup_script.contains(".find((el) => isVisible(el) && !el.disabled"));
+        assert!(
+            Provider::Grok
+                .composer_selectors_json()
+                .contains("textarea[aria-label*=")
+        );
+        assert!(Provider::Grok.composer_selectors_json().contains("Grok"));
+    }
+
+    #[test]
     fn auth_control_or_auth_path_has_logged_out_state() {
         let visible_auth_control = LoginSignals {
             account: false,
@@ -5789,7 +5865,15 @@ fn upload_attachments_to_provider(
             "            const composerSelectors = {};\n",
             composer_selectors
         )
-        + "            const el = composerSelectors.map((s) => document.querySelector(s)).find(Boolean);\n"
+        + "            const isVisible = (el) => {\n"
+        + "                if (!el || el.disabled || el.getAttribute('aria-disabled') === 'true') return false;\n"
+        + "                const style = window.getComputedStyle(el);\n"
+        + "                if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;\n"
+        + "                const rect = el.getBoundingClientRect();\n"
+        + "                return rect.width > 0 && rect.height > 0;\n"
+        + "            };\n"
+        + "            __VISIBLE_COMPOSER_LOOKUP__\n"
+        + "            const el = findVisibleComposer(composerSelectors);\n"
         + "            if (!el) {\n"
         + "                window.__upload_images_status = 'error: composer not found';\n"
         + "                return;\n"
@@ -5839,6 +5923,7 @@ fn upload_attachments_to_provider(
         + "    })();\n"
         + "    return true;\n"
         + "}";
+    let js = js.replace("__VISIBLE_COMPOSER_LOOKUP__", visible_composer_lookup_js());
 
     let start_res = call_mcp_tool(
         config_path,
@@ -6252,10 +6337,24 @@ fn wait_for_submit_status(config_path: &str) -> Result<String, String> {
     Ok(status)
 }
 
+fn visible_composer_lookup_js() -> &'static str {
+    r#"const findVisibleComposer = (selectors) => selectors
+        .flatMap((selector) => Array.from(document.querySelectorAll(selector)))
+        .find((el) => isVisible(el) && !el.disabled && el.getAttribute('aria-disabled') !== 'true');"#
+}
+
 fn focus_and_clear_composer(config_path: &str, provider: Provider) -> Result<(), String> {
     let js = r#"() => {
             const composerSelectors = __COMPOSER_SELECTORS__;
-            const el = composerSelectors.map((s) => document.querySelector(s)).find(Boolean);
+            const isVisible = (el) => {
+                if (!el || el.disabled || el.getAttribute('aria-disabled') === 'true') return false;
+                const style = window.getComputedStyle(el);
+                if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+                const rect = el.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0;
+            };
+            __VISIBLE_COMPOSER_LOOKUP__
+            const el = findVisibleComposer(composerSelectors);
             if (!el) {
                 return { ok: false, error: 'composer not found' };
             }
@@ -6287,7 +6386,8 @@ fn focus_and_clear_composer(config_path: &str, provider: Provider) -> Result<(),
             el.focus();
             return { ok: true };
         }"#
-    .replace("__COMPOSER_SELECTORS__", provider.composer_selectors_json());
+    .replace("__COMPOSER_SELECTORS__", provider.composer_selectors_json())
+    .replace("__VISIBLE_COMPOSER_LOOKUP__", visible_composer_lookup_js());
 
     let res = call_mcp_tool(
         config_path,
@@ -6431,7 +6531,8 @@ fn submit_regular_prompt(
                         try { return el.matches(s); } catch (e) { return false; }
                     });
 
-                    const el = composerSelectors.map((s) => document.querySelector(s)).find(Boolean);
+                    __VISIBLE_COMPOSER_LOOKUP__
+                    const el = findVisibleComposer(composerSelectors);
                     if (!el) {
                         window.__submit_status = 'error: composer not found';
                         return;
@@ -6527,6 +6628,7 @@ fn submit_regular_prompt(
     .replace("__COMPOSER_SELECTORS__", provider.composer_selectors_json())
     .replace("__SEND_SELECTORS__", provider.send_button_selectors_json())
     .replace("__STOP_SELECTORS__", provider.stop_button_selectors_json())
+    .replace("__VISIBLE_COMPOSER_LOOKUP__", visible_composer_lookup_js())
     .replace("__PROMPT__", &prompt_json);
 
     let start_res = call_mcp_tool(
